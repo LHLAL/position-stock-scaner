@@ -932,18 +932,82 @@ class WebStockAnalyzer:
     def _call_akshare_api(self, func_names, retries=2, retry_delay=0.5, log_failure=True, **kwargs):
         """兼容调用akshare接口：自动过滤不支持参数并重试"""
         try:
-            import akshare as ak
+            import sys
+            import types
+            import curl_cffi.requests as curl_requests
 
-            if not hasattr(ak, '_tls_patched'):
-                ak._original_requests = ak.requests if hasattr(ak, 'requests') else None
-                import curl_cffi.requests as curl_requests
-                ak.requests = curl_requests.Session(impersonate="chrome120")
-                ak._tls_patched = True
+            # 保存原始 requests 模块（用于 finally 恢复）
+            _original_requests = sys.modules.get('requests')
+            import requests as _real_requests
+
+            # 使用 types.ModuleType 创建真正的模块对象
+            _patched_requests = types.ModuleType('requests')
+
+            # 1. 设置 Session 类（curl_cffi 版本，impersonate chrome120）
+            class _CurlCffiSession(curl_requests.Session):
+                def __init__(self, *args, **kwargs):
+                    kwargs['impersonate'] = 'chrome120'
+                    super().__init__(*args, **kwargs)
+                
+                def mount(self, prefix, adapter):
+                    pass
+
+            _patched_requests.Session = _CurlCffiSession
+
+            # 2. 设置 get/post 函数（使用 curl_cffi）
+            def _patched_get(url, **kw):
+                timeout = kw.pop('timeout', 10)
+                return curl_requests.get(url, impersonate='chrome120', timeout=timeout, **kw)
+            
+            def _patched_post(url, **kw):
+                timeout = kw.pop('timeout', 10)
+                return curl_requests.post(url, impersonate='chrome120', timeout=timeout, **kw)
+            
+            _patched_requests.get = _patched_get
+            _patched_requests.post = _patched_post
+
+            # 3. 设置 Response 类（必须在复制子模块之前，因为 akshare 类型提示需要）
+            _patched_requests.Response = _real_requests.Response
+
+            # 4. 复制子模块（使用真实的 requests 子模块）
+            _patched_requests.adapters = _real_requests.adapters
+            _patched_requests.models = _real_requests.models
+            _patched_requests.exceptions = _real_requests.exceptions
+            _patched_requests.sessions = _real_requests.sessions
+            _patched_requests.utils = _real_requests.utils
+            _patched_requests.api = _real_requests.api
+            _patched_requests.auth = _real_requests.auth
+            _patched_requests.cookies = _real_requests.cookies
+            _patched_requests.status_codes = _real_requests.status_codes
+            _patched_requests.structures = _real_requests.structures
+
+            # 4. 设置异常类（直接从 exceptions 取）
+            _exc = _real_requests.exceptions
+            for _name in ['RequestException', 'HTTPError', 'ConnectionError', 'Timeout',
+                          'URLRequired', 'MissingSchema', 'InvalidSchema', 'InvalidURL',
+                          'InvalidProxyURL', 'ChildProxyError', 'ProxyError', 'SSLError',
+                          'TooManyRedirects', 'MissingMIMEType', 'InvalidTemplateException',
+                          'InvalidHeader', 'UnsupportedDigestAuthMethod', 'DigestAuth']:
+                if hasattr(_exc, _name):
+                    setattr(_patched_requests, _name, getattr(_exc, _name))
+
+            # 5. 替换 sys.modules['requests']
+            sys.modules['requests'] = _patched_requests
+
+            # 6. 导入 akshare
+            import akshare as ak
 
         except Exception as import_error:
             if log_failure:
                 self.logger.warning(f"导入akshare失败: {import_error}")
             return None
+
+        finally:
+            # 恢复原始 requests 模块
+            if _original_requests is not None:
+                sys.modules['requests'] = _original_requests
+            elif 'requests' in sys.modules:
+                del sys.modules['requests']
 
         names = func_names if isinstance(func_names, (list, tuple)) else [func_names]
         last_error = None
