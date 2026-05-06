@@ -17,8 +17,11 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 import time
 import re
 import requests
+from curl_cffi import requests as curl_requests
 import xml.etree.ElementTree as ET
 import inspect
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # 忽略警告
 warnings.filterwarnings('ignore')
@@ -32,6 +35,47 @@ logging.basicConfig(
     ]
 )
 
+class TLSConnection:
+    """TLS指纹伪装连接器 - 使用curl_cffi模拟Chrome浏览器TLS指纹"""
+
+    def __init__(self):
+        """初始化TLS连接器"""
+        # 主会话：使用curl_cffi模拟Chrome 120 TLS指纹
+        self.session = curl_requests.Session(impersonate="chrome120")
+
+        # 默认请求头（模拟真实浏览器）
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        })
+
+        # 备用会话：标准requests（用于curl_cffi失败时降级）
+        self.fallback = requests.Session()
+        self.fallback.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+
+    def get(self, url, **kwargs):
+        """发送GET请求（优先使用curl_cffi，降级到requests）"""
+        try:
+            return self.session.get(url, **kwargs)
+        except Exception as e:
+            # 降级到标准requests
+            return self.fallback.get(url, **kwargs)
+
+    def post(self, url, **kwargs):
+        """发送POST请求（优先使用curl_cffi，降级到requests）"""
+        try:
+            return self.session.post(url, **kwargs)
+        except Exception as e:
+            # 降级到标准requests
+            return self.fallback.post(url, **kwargs)
+
 class WebStockAnalyzer:
     """Web版增强股票分析器（基于最新 stock_analyzer.py 修正，支持AI流式输出）"""
     
@@ -39,7 +83,13 @@ class WebStockAnalyzer:
         """初始化分析器"""
         self.logger = logging.getLogger(__name__)
         self.config_file = config_file
-        
+
+        # 检查并配置代理（如果设置了代理但不可达，则清除代理配置走直连）
+        self._check_and_configure_proxy()
+
+        # TLS指纹伪装连接器
+        self.tls_conn = TLSConnection()
+
         # 加载配置文件
         self.config = self._load_config()
         
@@ -549,8 +599,8 @@ class WebStockAnalyzer:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
             }
 
-            # 使用连接/读取分离超时，避免单次调用长时间阻塞
-            response = requests.get(url, params=params, headers=headers, timeout=(3, 8))
+# 使用连接/读取分离超时，避免单次调用长时间阻塞
+            response = self.tls_conn.get(url, params=params, headers=headers, timeout=(3, 8))
             response.raise_for_status()
 
             payload = response.json()
@@ -811,10 +861,85 @@ class WebStockAnalyzer:
         )
         return any(marker in text for marker in markers)
 
+    def _check_and_configure_proxy(self):
+        """检测代理是否可用，如果不可达则清除代理设置走直连"""
+        import os
+        import socket
+        import requests
+
+        proxy_keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+
+        for key in proxy_keys:
+            proxy_url = os.environ.get(key)
+            if not proxy_url:
+                continue
+
+            # 提取主机和端口
+            try:
+                # 格式: http://127.0.0.1:7897/
+                host_port = proxy_url.replace('http://', '').replace('https://', '').rstrip('/')
+                if ':' in host_port:
+                    host, port_str = host_port.split(':')
+                    port = int(port_str)
+                else:
+                    host = host_port
+                    port = 80 if key.startswith('HTTPS') else 8080
+
+                # 先尝试 TCP 连接检测代理端口是否可达
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                tcp_result = sock.connect_ex((host, port))
+                sock.close()
+
+                if tcp_result != 0:
+                    self.logger.warning(f"⚠️ 代理 {key}={proxy_url} 端口不可达，清除代理设置走直连")
+                    for k in proxy_keys:
+                        os.environ.pop(k, None)
+                    os.environ['NO_PROXY'] = '*'
+                    return
+
+                # 端口可达，测试 HTTP 请求是否真的能通过代理
+                try:
+                    test_proxies = {
+                        'http': proxy_url,
+                        'https': proxy_url
+                    }
+                    resp = self.tls_conn.get(
+                        'https://push2his.eastmoney.com/',
+                        proxies=test_proxies,
+                        timeout=5,
+                        allow_redirects=False
+                    )
+                    # 只要能收到任何 HTTP 响应（包括 404）就算代理可用
+                    self.logger.info(f"✅ 代理 {key}={proxy_url} HTTP请求成功(状态码:{resp.status_code})")
+                    return
+                except Exception as http_err:
+                    # HTTP 请求失败，当作代理不可用处理
+                    self.logger.warning(f"⚠️ 代理 {key}={proxy_url} HTTP请求失败({type(http_err).__name__})，清除代理设置走直连")
+                    for k in proxy_keys:
+                        os.environ.pop(k, None)
+                    os.environ['NO_PROXY'] = '*'
+                    return
+
+            except Exception:
+                # 解析失败，当作不可达处理
+                self.logger.warning(f"⚠️ 代理 {key}={proxy_url} 解析失败，清除代理设置走直连")
+                for k in proxy_keys:
+                    os.environ.pop(k, None)
+                os.environ['NO_PROXY'] = '*'
+                return
+
     def _call_akshare_api(self, func_names, retries=2, retry_delay=0.5, log_failure=True, **kwargs):
         """兼容调用akshare接口：自动过滤不支持参数并重试"""
         try:
             import akshare as ak
+
+            if not hasattr(ak, '_tls_patched'):
+                ak._original_requests = ak.requests if hasattr(ak, 'requests') else None
+                import curl_cffi.requests as curl_requests
+                ak.requests = curl_requests.Session(impersonate="chrome120")
+                ak._tls_patched = True
+
         except Exception as import_error:
             if log_failure:
                 self.logger.warning(f"导入akshare失败: {import_error}")
@@ -1520,7 +1645,7 @@ class WebStockAnalyzer:
 
         for rss_url in rss_urls:
             try:
-                response = requests.get(
+                response = self.tls_conn.get(
                     rss_url,
                     timeout=12,
                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -2503,11 +2628,159 @@ class WebStockAnalyzer:
             except Exception as e:
                 technical_analysis['volume_status'] = '数据不足'
             
+            # VR成交量比率指标
+            try:
+                if len(price_data) >= 26:
+                    close_series = price_data['close']
+                    volume_series = price_data['volume']
+                    lc = close_series.shift(1)
+
+                    vol_up = np.where(close_series > lc, volume_series, 0)
+                    vol_down = np.where(close_series <= lc, volume_series, 0)
+
+                    sum_vol_up = pd.Series(vol_up).rolling(window=26, min_periods=1).sum()
+                    sum_vol_down = pd.Series(vol_down).rolling(window=26, min_periods=1).sum()
+
+                    vr_array = np.where(sum_vol_down != 0, (sum_vol_up / sum_vol_down) * 100, 100.0)
+                    vr_value = safe_float(vr_array[-1], 100.0)
+
+                    technical_analysis['vr'] = max(0.0, min(300.0, vr_value))
+                else:
+                    technical_analysis['vr'] = 100.0
+            except Exception as e:
+                technical_analysis['vr'] = 100.0
+
+            try:
+                if len(price_data) >= 15:
+                    n, m = 14, 9
+                    high = price_data['high']
+                    low = price_data['low']
+                    volume = price_data['volume']
+
+                    volume_ma = volume.rolling(window=n, min_periods=1).mean()
+                    volume_ratio = volume_ma / volume.replace(0, np.nan)
+
+                    hl_sum = high + low
+                    hl_sum_ref = hl_sum.shift(1)
+                    mid = 100 * (hl_sum - hl_sum_ref) / hl_sum.replace(0, np.nan)
+
+                    hl_diff = high - low
+                    hl_diff_ma = hl_diff.rolling(window=n, min_periods=1).mean()
+
+                    emv_raw = mid * volume_ratio * hl_diff / hl_diff_ma.replace(0, np.nan)
+                    emv = emv_raw.rolling(window=n, min_periods=1).mean()
+                    maemv = emv.rolling(window=m, min_periods=1).mean()
+
+                    technical_analysis['emv'] = safe_float(emv.iloc[-1], 0.0)
+                    technical_analysis['maemv'] = safe_float(maemv.iloc[-1], 0.0)
+                else:
+                    technical_analysis['emv'] = 0.0
+                    technical_analysis['maemv'] = 0.0
+            except Exception as e:
+                technical_analysis['emv'] = 0.0
+                technical_analysis['maemv'] = 0.0
+
+# CCI顺势指标
+            try:
+                tp_series = (price_data['high'] + price_data['low'] + price_data['close']) / 3
+                tp_ma = tp_series.rolling(window=14, min_periods=1).mean()
+                tp_avedev = tp_series.rolling(window=14, min_periods=1).apply(
+                    lambda x: np.abs(x - x.mean()).mean(), raw=True
+                )
+                cci_value = (tp_series - tp_ma) / (0.015 * tp_avedev)
+                technical_analysis['cci'] = safe_float(cci_value.iloc[-1], 0.0)
+            except Exception as e:
+                technical_analysis['cci'] = 0.0
+
+            try:
+                if len(price_data) >= 26:
+                    high = price_data['high']
+                    low = price_data['low']
+                    open_price = price_data['open']
+                    close = price_data['close']
+                    ref_close = close.shift(1)
+                    sum_high_open = (high - open_price).rolling(window=26, min_periods=26).sum()
+                    sum_open_low = (open_price - low).rolling(window=26, min_periods=26).sum()
+                    ar_value = np.where(sum_open_low != 0, (sum_high_open / sum_open_low) * 100, 100.0)
+                    technical_analysis['ar'] = safe_float(ar_value[-1], 50.0)
+                    sum_high_ref = np.maximum(0, high - ref_close).rolling(window=26, min_periods=26).sum()
+                    sum_ref_low = np.maximum(0, ref_close - low).rolling(window=26, min_periods=26).sum()
+                    br_value = np.where(sum_ref_low != 0, (sum_high_ref / sum_ref_low) * 100, 100.0)
+                    technical_analysis['br'] = safe_float(br_value[-1], 50.0)
+                else:
+                    technical_analysis['ar'] = 50.0
+                    technical_analysis['br'] = 50.0
+            except Exception as e:
+                technical_analysis['ar'] = 50.0
+                technical_analysis['br'] = 50.0
+
+            close_prices = price_data['close']
+            ema1 = close_prices.ewm(span=12, min_periods=1).mean()
+            ema2 = ema1.ewm(span=12, min_periods=1).mean()
+            tr = ema2.ewm(span=12, min_periods=1).mean()
+            ref_tr = tr.shift(1)
+            trix = ((tr - ref_tr) / ref_tr) * 100
+            trma = trix.rolling(window=20, min_periods=1).mean()
+            technical_analysis['trix'] = safe_float(trix.iloc[-1], 0.0)
+            technical_analysis['trma'] = safe_float(trma.iloc[-1], 0.0)
+
+            # MTM动量指标
+            try:
+                if len(price_data) >= 12:
+                    n, m = 12, 6
+                    close = price_data['close']
+                    mtm = close - close.shift(n)
+                    mtmma = mtm.rolling(window=m, min_periods=1).mean()
+                    technical_analysis['mtm'] = safe_float(mtm.iloc[-1], 0.0)
+                    technical_analysis['mtmma'] = safe_float(mtmma.iloc[-1], 0.0)
+                else:
+                    technical_analysis['mtm'] = 0.0
+                    technical_analysis['mtmma'] = 0.0
+            except Exception as e:
+                technical_analysis['mtm'] = 0.0
+                technical_analysis['mtmma'] = 0.0
+
+            try:
+                close = price_data['close']
+                dif = close.rolling(window=10, min_periods=1).mean() - close.rolling(window=50, min_periods=1).mean()
+                difma = dif.rolling(window=10, min_periods=1).mean()
+                technical_analysis['dma'] = safe_float(dif.iloc[-1], 0.0)
+                technical_analysis['difma_dma'] = safe_float(difma.iloc[-1], 0.0)
+            except Exception as e:
+                technical_analysis['dma'] = 0.0
+                technical_analysis['difma_dma'] = 0.0
+
             return technical_analysis
             
         except Exception as e:
             self.logger.error(f"技术指标计算失败: {str(e)}")
             return self._get_default_technical_analysis()
+
+    def _sample_data_for_llm(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        
+        if len(df) <= 60:
+            return df.copy()
+        
+        try:
+            df_dict = df.copy()
+            df_dict.index = df_dict.index.strftime('%Y-%m-%d')
+            
+            all_dates = list(df_dict.index)
+            recent_dates = all_dates[-60:]
+            early_dates = all_dates[:-60]
+            sampled_early_dates = early_dates[::2]
+            selected_dates = sampled_early_dates + recent_dates
+            
+            sampled_df = df.loc[selected_dates].copy()
+            
+            self.logger.info(f"✓ 数据采样完成: {len(df)}条 -> {len(sampled_df)}条 (减少{len(df) - len(sampled_df)}条)")
+            return sampled_df
+            
+        except Exception as e:
+            self.logger.warning(f"数据采样失败: {e}，使用原始数据")
+            return df.copy()
 
     def _get_default_technical_analysis(self):
         """获取默认技术分析结果"""
@@ -2516,7 +2789,19 @@ class WebStockAnalyzer:
             'rsi': 50.0,
             'macd_signal': '数据不足',
             'bb_position': 0.5,
-            'volume_status': '数据不足'
+            'volume_status': '数据不足',
+            'vr': 100.0,
+            'emv': 0.0,
+            'maemv': 0.0,
+            'cci': 0.0,
+            'trix': 0.0,
+            'trma': 0.0,
+            'ar': 50.0,
+            'br': 50.0,
+            'mtm': 0.0,
+            'mtmma': 0.0,
+            'dma': 0.0,
+            'difma_dma': 0.0
         }
 
     def calculate_technical_score(self, technical_analysis):
@@ -2564,6 +2849,214 @@ class WebStockAnalyzer:
         except Exception as e:
             self.logger.error(f"技术分析评分失败: {str(e)}")
             return 50
+
+    def _generate_trading_signals(self, price_data: pd.DataFrame, technical_analysis: dict) -> List[Dict[str, str]]:
+        signals = []
+        
+        def safe_float(value, default=0.0):
+            try:
+                if pd.isna(value):
+                    return default
+                num_value = float(value)
+                if math.isnan(num_value) or math.isinf(num_value):
+                    return default
+                return num_value
+            except (ValueError, TypeError):
+                return default
+        
+        try:
+            if price_data is None or price_data.empty or len(price_data) < 2:
+                return [{'type': '数据不足', 'signal': 'neutral', 'description': '数据不足，无法生成交易信号'}]
+            
+            # 计算KDJ
+            try:
+                low_min = price_data['low'].rolling(window=9, min_periods=1).min()
+                high_max = price_data['high'].rolling(window=9, min_periods=1).max()
+                rsv = (price_data['close'] - low_min) / (high_max - low_min + 1e-9) * 100
+                k_value = rsv.ewm(alpha=1/3, adjust=False).mean()
+                d_value = k_value.ewm(alpha=1/3, adjust=False).mean()
+                j_value = 3 * k_value - 2 * d_value
+            except Exception:
+                k_value = pd.Series([50.0] * len(price_data))
+                d_value = pd.Series([50.0] * len(price_data))
+                j_value = pd.Series([50.0] * len(price_data))
+            
+            # 计算ROC
+            try:
+                roc = (price_data['close'] - price_data['close'].shift(12)) / (price_data['close'].shift(12) + 1e-9) * 100
+                maroc = roc.rolling(window=6, min_periods=1).mean()
+            except Exception:
+                roc = pd.Series([0.0] * len(price_data))
+                maroc = pd.Series([0.0] * len(price_data))
+            
+            # MACD信号
+            macd_signal = technical_analysis.get('macd_signal', '横盘整理')
+            if '金叉' in macd_signal:
+                signals.append({
+                    'type': 'MACD金叉',
+                    'signal': 'buy',
+                    'description': 'MACD金叉形成，可能上涨'
+                })
+            elif '死叉' in macd_signal:
+                signals.append({
+                    'type': 'MACD死叉',
+                    'signal': 'sell',
+                    'description': 'MACD死叉形成，可能下跌'
+                })
+            
+            # DMI信号
+            try:
+                high = price_data['high']
+                low = price_data['low']
+                close = price_data['close']
+                
+                # 计算DMI
+                plus_dm = high.diff()
+                minus_dm = -low.diff()
+                plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+                minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+                
+                tr = pd.concat([
+                    high - low,
+                    (high - close.shift(1)).abs(),
+                    (low - close.shift(1)).abs()
+                ], axis=1).max(axis=1)
+                
+                atr = tr.rolling(window=14, min_periods=1).sum()
+                plus_di = 100 * (plus_dm.rolling(window=14, min_periods=1).sum() / atr)
+                minus_di = 100 * (minus_dm.rolling(window=14, min_periods=1).sum() / atr)
+                
+                current_pdi = safe_float(plus_di.iloc[-1])
+                prev_pdi = safe_float(plus_di.iloc[-2])
+                current_mdi = safe_float(minus_di.iloc[-1])
+                prev_mdi = safe_float(minus_di.iloc[-2])
+                
+                if current_pdi > current_mdi and prev_pdi <= prev_mdi:
+                    signals.append({
+                        'type': 'DMI金叉',
+                        'signal': 'buy',
+                        'description': 'DMI金叉，上升趋势形成'
+                    })
+                elif current_pdi < current_mdi and prev_pdi >= prev_mdi:
+                    signals.append({
+                        'type': 'DMI死叉',
+                        'signal': 'sell',
+                        'description': 'DMI死叉，下降趋势形成'
+                    })
+            except Exception:
+                pass
+            
+            # KDJ信号
+            current_k = safe_float(k_value.iloc[-1])
+            current_d = safe_float(d_value.iloc[-1])
+            prev_k = safe_float(k_value.iloc[-2]) if len(k_value) >= 2 else current_k
+            prev_d = safe_float(d_value.iloc[-2]) if len(d_value) >= 2 else current_d
+            
+            if current_k < 20 and current_d < 20:
+                signals.append({
+                    'type': 'KDJ超卖',
+                    'signal': 'buy',
+                    'description': 'KDJ超卖，可能反弹'
+                })
+            elif current_k > 80 and current_d > 80:
+                signals.append({
+                    'type': 'KDJ超买',
+                    'signal': 'sell',
+                    'description': 'KDJ超买，注意回调'
+                })
+            
+            # RSI信号
+            rsi = technical_analysis.get('rsi', 50.0)
+            if rsi < 30:
+                signals.append({
+                    'type': 'RSI超卖',
+                    'signal': 'buy',
+                    'description': 'RSI超卖，可能反弹'
+                })
+            elif rsi > 70:
+                signals.append({
+                    'type': 'RSI超买',
+                    'signal': 'sell',
+                    'description': 'RSI超买，注意回调'
+                })
+            
+            # BOLL信号
+            try:
+                bb_window = min(20, len(price_data))
+                bb_middle = price_data['close'].rolling(window=bb_window, min_periods=1).mean()
+                bb_std = price_data['close'].rolling(window=bb_window, min_periods=1).std()
+                boll_up = bb_middle + 2 * bb_std
+                boll_low = bb_middle - 2 * bb_std
+                
+                current_close = safe_float(price_data['close'].iloc[-1])
+                current_boll_up = safe_float(boll_up.iloc[-1])
+                current_boll_low = safe_float(boll_low.iloc[-1])
+                
+                if current_close > current_boll_up:
+                    signals.append({
+                        'type': 'BOLL突破上轨',
+                        'signal': 'sell',
+                        'description': '股价突破布林上轨，超买状态'
+                    })
+                elif current_close < current_boll_low:
+                    signals.append({
+                        'type': 'BOLL跌破下轨',
+                        'signal': 'buy',
+                        'description': '股价跌破布林下轨，超卖状态'
+                    })
+            except Exception:
+                pass
+            
+            # VR信号
+            vr = technical_analysis.get('vr', 100.0)
+            if vr > 160:
+                signals.append({
+                    'type': 'VR市场活跃',
+                    'signal': 'neutral',
+                    'description': 'VR大于160，市场活跃度高'
+                })
+            elif vr < 40:
+                signals.append({
+                    'type': 'VR市场低迷',
+                    'signal': 'neutral',
+                    'description': 'VR小于40，市场活跃度低'
+                })
+            
+            # ROC信号
+            current_roc = safe_float(roc.iloc[-1])
+            prev_roc = safe_float(roc.iloc[-2]) if len(roc) >= 2 else current_roc
+            current_maroc = safe_float(maroc.iloc[-1])
+            prev_maroc = safe_float(maroc.iloc[-2]) if len(maroc) >= 2 else current_maroc
+            
+            if current_roc > current_maroc and prev_roc <= prev_maroc:
+                signals.append({
+                    'type': 'ROC上穿',
+                    'signal': 'buy',
+                    'description': 'ROC上穿均线，上升动能增强'
+                })
+            elif current_roc < current_maroc and prev_roc >= prev_maroc:
+                signals.append({
+                    'type': 'ROC下穿',
+                    'signal': 'sell',
+                    'description': 'ROC下穿均线，上升动能减弱'
+                })
+            
+            if not signals:
+                signals.append({
+                    'type': '无明显信号',
+                    'signal': 'neutral',
+                    'description': '当前无明显交易信号'
+                })
+            
+        except Exception as e:
+            self.logger.error(f"生成交易信号时出错: {str(e)}")
+            signals.append({
+                'type': '信号生成失败',
+                'signal': 'neutral',
+                'description': f'技术分析计算出错: {str(e)}'
+            })
+        
+        return signals
 
     def calculate_fundamental_score(self, fundamental_data):
         """计算基本面得分"""
@@ -3771,7 +4264,10 @@ class WebStockAnalyzer:
                 position_cost=position_cost,
                 current_price=price_info.get('current_price', 0.0)
             )
-            technical_analysis = self.calculate_technical_indicators(price_data)
+            
+            sampled_price_data = self._sample_data_for_llm(price_data)
+            
+            technical_analysis = self.calculate_technical_indicators(sampled_price_data)
             technical_score = self.calculate_technical_score(technical_analysis)
             
             # 2. 获取25项财务指标和综合基本面分析
@@ -3931,6 +4427,569 @@ def main():
             
         except Exception as e:
             print(f"分析 {stock_code} 失败: {e}")
+
+
+def generate_chart_html(price_data, technical_data):
+        """
+        生成包含价格走势、MACD、KDJ、RSI的交互式Plotly图表HTML
+
+        Args:
+            price_data: DataFrame with columns [date, open, high, low, close, volume]
+            technical_data: dict with keys [MACD, KDJ, RSI, close, volume]
+
+        Returns:
+            HTML string containing Plotly chart
+        """
+        try:
+            if price_data is None or price_data.empty:
+                return "<div class='chart-error'>无价格数据</div>"
+
+            # 计算技术指标数据
+            close = price_data['close']
+            dates = price_data.index if hasattr(price_data, 'index') else price_data['date']
+
+            # MACD计算
+            ema12 = close.ewm(span=12, min_periods=1).mean()
+            ema26 = close.ewm(span=26, min_periods=1).mean()
+            macd_line = ema12 - ema26
+            signal_line = macd_line.ewm(span=9, min_periods=1).mean()
+            macd_histogram = macd_line - signal_line
+
+            # KDJ计算
+            low_min = price_data['low'].rolling(window=9, min_periods=1).min()
+            high_max = price_data['high'].rolling(window=9, min_periods=1).max()
+            rsv = (close - low_min) / (high_max - low_min + 1e-9) * 100
+            k_value = rsv.ewm(alpha=1/3, adjust=False).mean()
+            d_value = k_value.ewm(alpha=1/3, adjust=False).mean()
+            j_value = 3 * k_value - 2 * d_value
+
+            # RSI计算
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0).rolling(window=14, min_periods=1).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+            rs = gain / loss
+            rsi_values = 100 - (100 / (1 + rs))
+
+            # 获取日期字符串
+            if hasattr(dates, 'strftime'):
+                date_strs = dates.strftime('%Y-%m-%d').tolist() if hasattr(dates, 'tolist') else [dates.strftime('%Y-%m-%d')]
+            else:
+                date_strs = [str(d) for d in dates]
+
+            # 创建4子图布局：K线(60%)、MACD(15%)、KDJ(12.5%)、RSI(12.5%)
+            fig = make_subplots(
+                rows=4, cols=1,
+                row_heights=[0.60, 0.15, 0.125, 0.125],
+                subplot_titles=('价格走势 (K线)', 'MACD', 'KDJ', 'RSI'),
+                vertical_spacing=0.05
+            )
+
+            # 子图1：K线蜡烛图
+            fig.add_trace(
+                go.Candlestick(
+                    x=date_strs,
+                    open=price_data['open'],
+                    high=price_data['high'],
+                    low=price_data['low'],
+                    close=close,
+                    name='K线',
+                    increasing_line_color='#26a69a',
+                    decreasing_line_color='#ef5350'
+                ),
+                row=1, col=1
+            )
+
+            # 添加MA5, MA10, MA20均线
+            ma5 = close.rolling(window=5, min_periods=1).mean()
+            ma10 = close.rolling(window=10, min_periods=1).mean()
+            ma20 = close.rolling(window=20, min_periods=1).mean()
+
+            fig.add_trace(go.Scatter(x=date_strs, y=ma5, name='MA5', line=dict(color='#ffa726', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=date_strs, y=ma10, name='MA10', line=dict(color='#42a5f5', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=date_strs, y=ma20, name='MA20', line=dict(color='#ab47bc', width=1)), row=1, col=1)
+
+            # 子图2：MACD
+            fig.add_trace(
+                go.Scatter(x=date_strs, y=macd_line, name='DIF', line=dict(color='#2196f3', width=1.5)),
+                row=2, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=date_strs, y=signal_line, name='DEA', line=dict(color='#ff9800', width=1.5)),
+                row=2, col=1
+            )
+            # MACD柱状图
+            colors = ['#26a69a' if h >= 0 else '#ef5350' for h in macd_histogram]
+            fig.add_trace(
+                go.Bar(x=date_strs, y=macd_histogram, name='MACD柱', marker_color=colors),
+                row=2, col=1
+            )
+
+            # 子图3：KDJ
+            fig.add_trace(
+                go.Scatter(x=date_strs, y=k_value, name='K', line=dict(color='#9c27b0', width=1.5)),
+                row=3, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=date_strs, y=d_value, name='D', line=dict(color='#ff5722', width=1.5)),
+                row=3, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=date_strs, y=j_value, name='J', line=dict(color='#00bcd4', width=1), opacity=0.7),
+                row=3, col=1
+            )
+
+            # 子图4：RSI
+            fig.add_trace(
+                go.Scatter(x=date_strs, y=rsi_values, name='RSI', line=dict(color='#e91e63', width=1.5)),
+                row=4, col=1
+            )
+            # 添加RSI超买超卖线
+            fig.add_hline(y=70, line_dash="dash", line_color="#ef5350", annotation_text="超买", row=4, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="#26a69a", annotation_text="超卖", row=4, col=1)
+
+            # 更新布局
+            fig.update_layout(
+                height=900,
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                template="plotly_white",
+                xaxis_rangeslider_visible=False,
+                hovermode="x unified"
+            )
+
+            # 更新Y轴标签
+            fig.update_yaxes(title_text="价格", row=1, col=1)
+            fig.update_yaxes(title_text="MACD", row=2, col=1)
+            fig.update_yaxes(title_text="KDJ", row=3, col=1)
+            fig.update_yaxes(title_text="RSI", range=[0, 100], row=4, col=1)
+
+            return fig.to_html(full_html=False, include_plotlyjs=False)
+
+        except Exception as e:
+            self.logger.error(f"生成图表HTML失败: {e}")
+            return f"<div class='chart-error'>图表生成失败: {str(e)}</div>"
+
+
+class BacktestEngine:
+    """回测引擎基类"""
+
+    def __init__(self, price_data, initial_capital=100000):
+        """
+        初始化回测引擎
+
+        Args:
+            price_data: DataFrame，含 ['date', 'open', 'high', 'low', 'close', 'volume']
+            initial_capital: 初始资金，默认10万
+        """
+        self.price_data = price_data
+        self.initial_capital = initial_capital
+        self.trades = []
+
+    def generate_signals(self):
+        """由子类实现，返回信号列表"""
+        raise NotImplementedError
+
+    def run_backtest(self):
+        """执行回测，返回交易记录"""
+        signals = self.generate_signals()
+        self.trades = []
+        capital = self.initial_capital
+        position = 0  # 持仓股数
+        entry_price = 0
+
+        for i, signal in enumerate(signals):
+            if signal['action'] == 'buy' and position == 0:
+                # 买入
+                entry_price = signal['price']
+                shares = capital // entry_price
+                if shares > 0:
+                    capital -= shares * entry_price
+                    position = shares
+                    self.trades.append({
+                        'date': signal['date'],
+                        'action': 'buy',
+                        'price': entry_price,
+                        'shares': shares,
+                        'capital': capital,
+                        'signal': signal.get('signal_type', '')
+                    })
+            elif signal['action'] == 'sell' and position > 0:
+                # 卖出
+                exit_price = signal['price']
+                capital += position * exit_price
+                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                self.trades.append({
+                    'date': signal['date'],
+                    'action': 'sell',
+                    'price': exit_price,
+                    'shares': position,
+                    'capital': capital,
+                    'pnl_pct': pnl_pct,
+                    'signal': signal.get('signal_type', '')
+                })
+                position = 0
+                entry_price = 0
+
+        # 如果还有持仓，按最后价格平仓
+        if position > 0 and len(signals) > 0:
+            last_price = signals[-1]['price']
+            capital += position * last_price
+            self.trades.append({
+                'date': signals[-1]['date'],
+                'action': 'sell',
+                'price': last_price,
+                'shares': position,
+                'capital': capital,
+                'pnl_pct': (last_price - entry_price) / entry_price * 100 if entry_price > 0 else 0,
+                'signal': 'close_position'
+            })
+
+        return self.trades
+
+    def calculate_metrics(self, trades=None):
+        """计算收益率、夏普比率、最大回撤"""
+        if trades is None:
+            trades = self.trades
+
+        if not trades:
+            return {
+                'total_return': 0,
+                'sharpe_ratio': 0,
+                'max_drawdown': 0,
+                'trade_count': 0,
+                'win_rate': 0
+            }
+
+        final_capital = trades[-1]['capital'] if trades else self.initial_capital
+        total_return = (final_capital - self.initial_capital) / self.initial_capital * 100
+
+        # 计算夏普比率（简化版）
+        returns = []
+        for i, trade in enumerate(trades):
+            if trade['action'] == 'sell' and 'pnl_pct' in trade:
+                returns.append(trade['pnl_pct'] / 100)
+
+        if len(returns) >= 2:
+            mean_return = np.mean(returns)
+            std_return = np.std(returns)
+            sharpe_ratio = (mean_return / std_return * np.sqrt(252)) if std_return > 0 else 0
+        else:
+            sharpe_ratio = 0
+
+        # 计算最大回撤
+        peak = self.initial_capital
+        max_drawdown = 0
+        capital_curve = [self.initial_capital]
+        for trade in trades:
+            capital_curve.append(trade['capital'])
+
+        for cap in capital_curve:
+            if cap > peak:
+                peak = cap
+            drawdown = (peak - cap) / peak * 100 if peak > 0 else 0
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+        # 统计交易
+        sell_trades = [t for t in trades if t['action'] == 'sell']
+        win_trades = [t for t in sell_trades if t.get('pnl_pct', 0) > 0]
+
+        return {
+            'total_return': round(total_return, 2),
+            'sharpe_ratio': round(sharpe_ratio, 3),
+            'max_drawdown': round(max_drawdown, 2),
+            'trade_count': len(sell_trades),
+            'win_rate': round(len(win_trades) / len(sell_trades) * 100, 2) if sell_trades else 0
+        }
+
+
+class MACDCrossStrategy(BacktestEngine):
+    """MACD交叉策略"""
+
+    def generate_signals(self):
+        """生成MACD交叉信号"""
+        signals = []
+        close = self.price_data['close'].values
+
+        # 计算EMA
+        exp1 = pd.Series(close).ewm(span=12, adjust=False).mean()
+        exp2 = pd.Series(close).ewm(span=26, adjust=False).mean()
+        macd = exp1 - exp2
+        signal_line = macd.ewm(span=9, adjust=False).mean()
+
+        dates = self.price_data['date'].values
+
+        for i in range(1, len(close)):
+            if i < 26:
+                continue
+
+            prev_macd = macd.iloc[i - 1]
+            curr_macd = macd.iloc[i]
+            prev_signal = signal_line.iloc[i - 1]
+            curr_signal = signal_line.iloc[i]
+
+            # 金叉：MACD从下往上穿过信号线
+            if prev_macd < prev_signal and curr_macd > curr_signal:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'buy',
+                    'price': close[i],
+                    'signal_type': 'macd_bullish_cross'
+                })
+            # 死叉：MACD从上往下穿过信号线
+            elif prev_macd > prev_signal and curr_macd < curr_signal:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'sell',
+                    'price': close[i],
+                    'signal_type': 'macd_bearish_cross'
+                })
+
+        return signals
+
+
+class KDJOversoldOverboughtStrategy(BacktestEngine):
+    """KDJ超买超卖策略"""
+
+    def generate_signals(self):
+        """生成KDJ超买超卖信号"""
+        signals = []
+        high = self.price_data['high'].values
+        low = self.price_data['low'].values
+        close = self.price_data['close'].values
+        dates = self.price_data['date'].values
+
+        # 计算KDJ
+        period = 9
+        k_values = np.zeros(len(close))
+        d_values = np.zeros(len(close))
+        j_values = np.zeros(len(close))
+
+        for i in range(period, len(close)):
+            high_val = max(high[i - period:i + 1]) if i >= period else max(high[:i + 1])
+            low_val = min(low[i - period:i + 1]) if i >= period else min(low[:i + 1])
+            rsv = (close[i] - low_val) / (high_val - low_val) * 100 if high_val != low_val else 50
+
+            k_values[i] = 2 / 3 * k_values[i - 1] + rsv / 3 if i > period else 50
+            d_values[i] = 2 / 3 * d_values[i - 1] + k_values[i] / 3 if i > period else 50
+            j_values[i] = 3 * k_values[i] - 2 * d_values[i]
+
+        for i in range(20, len(close)):
+            # 超卖金叉：K从下往上穿越D，且K<30
+            if k_values[i] < 30 and d_values[i] < 30:
+                if k_values[i - 1] < d_values[i - 1] and k_values[i] > d_values[i]:
+                    signals.append({
+                        'date': dates[i],
+                        'action': 'buy',
+                        'price': close[i],
+                        'signal_type': 'kdj_oversold_cross'
+                    })
+
+            # 超买死叉：K从上往下穿越D，且K>70
+            elif k_values[i] > 70 and d_values[i] > 70:
+                if k_values[i - 1] > d_values[i - 1] and k_values[i] < d_values[i]:
+                    signals.append({
+                        'date': dates[i],
+                        'action': 'sell',
+                        'price': close[i],
+                        'signal_type': 'kdj_overbought_cross'
+                    })
+
+        return signals
+
+
+class RSIReturnStrategy(BacktestEngine):
+    """RSI回归策略"""
+
+    def generate_signals(self):
+        """生成RSI回归信号"""
+        signals = []
+        close = self.price_data['close'].values
+        dates = self.price_data['date'].values
+
+        # 计算RSI
+        rsi_values = np.zeros(len(close))
+        period = 14
+
+        for i in range(period, len(close)):
+            gains = 0
+            losses = 0
+            for j in range(i - period + 1, i + 1):
+                delta = close[j] - close[j - 1]
+                if delta > 0:
+                    gains += delta
+                else:
+                    losses -= delta
+
+            avg_gain = gains / period
+            avg_loss = losses / period
+            rs = avg_gain / avg_loss if avg_loss > 0 else 100
+            rsi_values[i] = 100 - 100 / (1 + rs)
+
+        for i in range(20, len(close)):
+            # RSI低于30超卖，买入信号
+            if rsi_values[i] < 30 and rsi_values[i - 1] >= 30:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'buy',
+                    'price': close[i],
+                    'signal_type': 'rsi_oversold'
+                })
+            # RSI高于70超买，卖出信号
+            elif rsi_values[i] > 70 and rsi_values[i - 1] <= 70:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'sell',
+                    'price': close[i],
+                    'signal_type': 'rsi_overbought'
+                })
+            # RSI从低位回升，回归策略
+            elif rsi_values[i] > 40 and rsi_values[i - 1] < 40:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'buy',
+                    'price': close[i],
+                    'signal_type': 'rsi_return'
+                })
+
+        return signals
+
+
+class BollingerBreakoutStrategy(BacktestEngine):
+    """布林带突破策略"""
+
+    def generate_signals(self):
+        """生成布林带突破信号"""
+        signals = []
+        close = self.price_data['close'].values
+        dates = self.price_data['date'].values
+
+        # 计算布林带
+        period = 20
+        sma = pd.Series(close).rolling(window=period).mean()
+        std = pd.Series(close).rolling(window=period).std()
+        upper_band = sma + 2 * std
+        lower_band = sma - 2 * std
+
+        for i in range(period, len(close)):
+            if pd.isna(upper_band.iloc[i]) or pd.isna(lower_band.iloc[i]):
+                continue
+
+            # 价格突破上轨
+            if close[i] > upper_band.iloc[i] and close[i - 1] <= upper_band.iloc[i - 1]:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'sell',
+                    'price': close[i],
+                    'signal_type': 'bollinger_upper_breakout'
+                })
+            # 价格跌破下轨
+            elif close[i] < lower_band.iloc[i] and close[i - 1] >= lower_band.iloc[i - 1]:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'buy',
+                    'price': close[i],
+                    'signal_type': 'bollinger_lower_breakout'
+                })
+
+        return signals
+
+
+class DMITrendStrategy(BacktestEngine):
+    """DMI趋势策略"""
+
+    def generate_signals(self):
+        """生成DMI趋势信号"""
+        signals = []
+        high = self.price_data['high'].values
+        low = self.price_data['low'].values
+        close = self.price_data['close'].values
+        dates = self.price_data['date'].values
+
+        period = 14
+
+        # 计算DMI
+        tr = np.zeros(len(close))
+        plus_dm = np.zeros(len(close))
+        minus_dm = np.zeros(len(close))
+
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i],
+                       abs(high[i] - close[i - 1]),
+                       abs(low[i] - close[i - 1]))
+            if high[i] - high[i - 1] > low[i - 1] - low[i]:
+                plus_dm[i] = max(high[i] - high[i - 1], 0)
+            if low[i - 1] - low[i] > high[i] - high[i - 1]:
+                minus_dm[i] = max(low[i - 1] - low[i], 0)
+
+        # 计算平滑ADX
+        adx_values = np.zeros(len(close))
+        plus_di = np.zeros(len(close))
+        minus_di = np.zeros(len(close))
+
+        for i in range(period, len(close)):
+            sum_tr = np.sum(tr[i - period + 1:i + 1])
+            sum_plus_dm = np.sum(plus_dm[i - period + 1:i + 1])
+            sum_minus_dm = np.sum(minus_dm[i - period + 1:i + 1])
+
+            if sum_tr > 0:
+                plus_di[i] = sum_plus_dm / sum_tr * 100
+                minus_di[i] = sum_minus_dm / sum_tr * 100
+
+        for i in range(period + 1, len(close)):
+            if plus_di[i] > minus_di[i] and plus_di[i - 1] <= minus_di[i - 1]:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'buy',
+                    'price': close[i],
+                    'signal_type': 'dmi_bullish'
+                })
+            elif plus_di[i] < minus_di[i] and plus_di[i - 1] >= minus_di[i - 1]:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'sell',
+                    'price': close[i],
+                    'signal_type': 'dmi_bearish'
+                })
+
+        return signals
+
+
+class MAMACrossStrategy(BacktestEngine):
+    """均线交叉策略"""
+
+    def generate_signals(self):
+        """生成均线交叉信号"""
+        signals = []
+        close = self.price_data['close'].values
+        dates = self.price_data['date'].values
+
+        # 计算短期和长期均线
+        ma_short = pd.Series(close).rolling(window=5).mean()
+        ma_long = pd.Series(close).rolling(window=20).mean()
+
+        for i in range(20, len(close)):
+            if pd.isna(ma_short.iloc[i]) or pd.isna(ma_long.iloc[i]):
+                continue
+
+            # 金叉：短期均线从下往上穿越长期均线
+            if ma_short.iloc[i - 1] < ma_long.iloc[i - 1] and ma_short.iloc[i] > ma_long.iloc[i]:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'buy',
+                    'price': close[i],
+                    'signal_type': 'ma_golden_cross'
+                })
+            # 死叉：短期均线从上往下穿越长期均线
+            elif ma_short.iloc[i - 1] > ma_long.iloc[i - 1] and ma_short.iloc[i] < ma_long.iloc[i]:
+                signals.append({
+                    'date': dates[i],
+                    'action': 'sell',
+                    'price': close[i],
+                    'signal_type': 'ma_death_cross'
+                })
+
+        return signals
 
 
 if __name__ == "__main__":

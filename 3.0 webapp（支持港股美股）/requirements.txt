@@ -19,6 +19,9 @@ zhipuai>=2.0,<3.0
 requests>=2.31,<3.0
 urllib3>=1.26,<3.0
 
+# TLS指纹伪装（解决东方财富TLS阻断问题）
+curl_cffi>=0.6.0
+
 # 其他工具
 python-dateutil>=2.8
 pytz>=2023.3
@@ -26,6 +29,7 @@ Jinja2>=3.1,<4.0
 MarkupSafe>=2.1,<3.0
 itsdangerous>=2.1,<3.0
 click>=8.1,<9.0
+plotly>=5.18,<6.0
 
 # 性能优化
 gunicorn>=21,<23
