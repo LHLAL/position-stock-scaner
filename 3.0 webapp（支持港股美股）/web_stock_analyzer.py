@@ -4304,6 +4304,7 @@ class WebStockAnalyzer:
             fundamental_data = analysis_data.get('fundamental_data', {})
             sentiment_analysis = analysis_data.get('sentiment_analysis', {})
             price_info = analysis_data.get('price_info', {})
+            position_context = analysis_data.get('position_context', {})
             
             analysis_sections = []
             
