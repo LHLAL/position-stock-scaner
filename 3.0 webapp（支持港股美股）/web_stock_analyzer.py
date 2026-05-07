@@ -779,16 +779,32 @@ class WebStockAnalyzer:
             stock_data = pd.DataFrame()
 
             if market == 'cn_a':
-                stock_data = self._call_akshare_api(
-                    'stock_zh_a_hist',
-                    retries=3,
-                    symbol=ak_symbol,
-                    period="daily",
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust="qfq"
-                )
-                # Browser fallback if AkShare fails
+                # Step 1: Try Yahoo Finance first (primary source)
+                yahoo_symbol = self._convert_cn_a_to_yahoo_symbol(display_code)
+                if yahoo_symbol:
+                    self.logger.info(f"尝试Yahoo Finance获取A股数据: {yahoo_symbol}")
+                    stock_data = self._get_cn_a_data_from_yahoo(
+                        ticker=yahoo_symbol,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    if stock_data is not None and not stock_data.empty:
+                        self.logger.info(f"✓ Yahoo A股数据成功: {yahoo_symbol}")
+                
+                # Step 2: Fallback to AkShare if Yahoo fails
+                if stock_data is None or stock_data.empty:
+                    self.logger.info(f"Yahoo A股获取失败，尝试AkShare: {display_code}")
+                    stock_data = self._call_akshare_api(
+                        'stock_zh_a_hist',
+                        retries=3,
+                        symbol=ak_symbol,
+                        period="daily",
+                        start_date=start_date,
+                        end_date=end_date,
+                        adjust="qfq"
+                    )
+                
+                # Step 3: Last fallback to Browser if AkShare fails
                 if (stock_data is None or stock_data.empty) and fetch_stock_via_browser:
                     self.logger.info(f"AkShare A股获取失败，尝试浏览器备用: {display_code}")
                     browser_data = fetch_stock_via_browser(ak_symbol)
