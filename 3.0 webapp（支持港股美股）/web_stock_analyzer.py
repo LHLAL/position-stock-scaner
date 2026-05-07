@@ -182,9 +182,11 @@ class WebStockAnalyzer:
         转换规则：
         - sh600519 → 600519.SS (上海)
         - sz000001 → 000001.SZ (深圳)
+        - 600519 (裸代码) → 600519.SS (上海)
+        - 000001 (裸代码) → 000001.SZ (深圳)
 
         Args:
-            symbol: A股代码，格式为 sh600519 或 sz000001
+            symbol: A股代码，格式为 sh600519, sz000001 或裸代码 600519
 
         Returns:
             Yahoo格式代码如 600519.SS，或 None（无效格式）
@@ -196,6 +198,11 @@ class WebStockAnalyzer:
             return symbol[2:] + '.SS'
         elif symbol.startswith('sz'):
             return symbol[2:] + '.SZ'
+        # Handle bare codes (6-digit Shanghai starts with 6, 5-digit Shenzhen starts with 0)
+        if re.match(r'^6\d{5}$', symbol):
+            return symbol + '.SS'
+        if re.match(r'^0\d{5}$', symbol):
+            return symbol + '.SZ'
         return None
 
     def _get_cn_a_data_from_yahoo(self, ticker, start_date, end_date):
