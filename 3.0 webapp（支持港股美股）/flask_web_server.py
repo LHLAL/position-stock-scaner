@@ -1255,6 +1255,21 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
                     }
                 }, 3000);
             };
+
+            let reconnectAttempts = 0;
+            const maxReconnectAttempts = 3;
+            sseConnection.onerror = function(e) {
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    console.warn(`SSE error, reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`);
+                    setTimeout(() => {
+                        const existingContent = document.getElementById('aiStreamContent');
+                        if (existingContent) existingContent.textContent = '';
+                        lastSequence = 0;
+                        reconnectAttempts = 0;
+                    }, 2000 * reconnectAttempts);
+                }
+            };
             
             sseConnection.onclose = function(event) {
                 addLog('🔌 SSE连接已关闭', 'warning');
@@ -1307,6 +1322,8 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
             const displayPnlPct = Number.isFinite(pnlPct) ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%` : '--';
             return `<p><strong>持仓成本:</strong> ¥${cost.toFixed(2)}（${state} ${displayPnlPct}）</p>`;
         }
+
+        let lastSequence = 0;
 
         function escapeHtml(text) {
             return String(text || '')
@@ -1399,6 +1416,14 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
         }
 
         function handleAIStream(data) {
+            const sequence = data.sequence || 0;
+            if (sequence <= lastSequence && lastSequence !== 0) {
+                console.warn('Out-of-order stream event, clearing content');
+                aiStreamDiv.textContent = '';
+                lastSequence = 0;
+            }
+            lastSequence = sequence;
+
             // 获取或创建AI流式显示区域
             let aiStreamDiv = document.getElementById('aiStreamContent');
             if (!aiStreamDiv) {
@@ -1655,6 +1680,10 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
             }
             
             // 处理AI分析的markdown内容（如果没有流式内容）
+            // Fallback: use partial_ai_content if ai_analysis is empty
+            if (report.partial_ai_content && !report.ai_analysis) {
+                report.ai_analysis = report.partial_ai_content;
+            }
             if (report.ai_analysis) {
                 aiAnalysisHtml = renderMarkdownContent(report.ai_analysis);
             } else {
@@ -2456,9 +2485,11 @@ def sse_stream():
 
 class StreamingAnalyzer:
     """流式分析器"""
-    
+    stream_sequence = 0
+
     def __init__(self, client_id):
         self.client_id = client_id
+        self.accumulated_ai_content = ""
     
     def send_log(self, message, log_type='info'):
         """发送日志消息"""
@@ -2508,16 +2539,20 @@ class StreamingAnalyzer:
             'message': message or '分析完成'
         })
     
-    def send_error(self, error_message):
+    def send_error(self, error_message, partial_ai_content=None):
         """发送错误信息"""
         sse_manager.send_to_client(self.client_id, 'analysis_error', {
-            'error': error_message
+            'error': error_message,
+            'partial_ai_content': partial_ai_content if partial_ai_content else getattr(self, 'accumulated_ai_content', '')
         })
     
     def send_ai_stream(self, content):
         """发送AI流式内容"""
+        StreamingAnalyzer.stream_sequence += 1
+        self.accumulated_ai_content += content
         sse_manager.send_to_client(self.client_id, 'ai_stream', {
-            'content': content
+            'content': content,
+            'sequence': StreamingAnalyzer.stream_sequence
         })
 
 def analyze_stock_streaming(stock_code, enable_streaming, client_id, position_cost=None):
@@ -2723,7 +2758,7 @@ def analyze_stock_streaming(stock_code, enable_streaming, client_id, position_co
         
     except Exception as e:
         error_msg = f"流式分析失败: {str(e)}"
-        streamer.send_error(error_msg)
+        streamer.send_error(error_msg, partial_ai_content=streamer.accumulated_ai_content)
         streamer.send_log(f"❌ {error_msg}", 'error')
         raise
 
@@ -2792,7 +2827,7 @@ def analyze_batch_streaming(stock_codes, client_id):
         
     except Exception as e:
         error_msg = f"批量流式分析失败: {str(e)}"
-        streamer.send_error(error_msg)
+        streamer.send_error(error_msg, partial_ai_content=streamer.accumulated_ai_content)
         streamer.send_log(f"❌ {error_msg}", 'error')
         raise
 

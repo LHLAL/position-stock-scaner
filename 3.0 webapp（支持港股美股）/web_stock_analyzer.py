@@ -4022,6 +4022,7 @@ class WebStockAnalyzer:
 
             model = str(model_override or self._get_provider_model(provider)).strip()
             max_tokens = int(max_tokens_override or ai_config.get('max_tokens', 6000))
+            request_timeout = int(ai_config.get('request_timeout_seconds', 2400))
             temperature = float(
                 ai_config.get('temperature', 0.7)
                 if temperature_override is None
@@ -4067,7 +4068,7 @@ class WebStockAnalyzer:
                             url,
                             headers=headers,
                             json=payload,
-                            timeout=(20, 300),
+                            timeout=(20, request_timeout),
                             stream=True
                         ) as response:
                             response.raise_for_status()
@@ -4112,7 +4113,7 @@ class WebStockAnalyzer:
                         url,
                         headers=headers,
                         json=payload,
-                        timeout=(20, 240)
+                        timeout=(20, request_timeout)
                     )
                     response.raise_for_status()
                     try:
