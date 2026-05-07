@@ -23,6 +23,16 @@ import inspect
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+try:
+    from browser_stock_fetcher import fetch_stock_via_browser
+except ImportError:
+    fetch_stock_via_browser = None
+
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+
 # 忽略警告
 warnings.filterwarnings('ignore')
 
@@ -151,6 +161,78 @@ class WebStockAnalyzer:
         
         self.logger.info("Web版股票分析器初始化完成（支持AI流式输出）")
         self._log_config_status()
+
+    def _browser_data_to_df(self, data):
+        """将浏览器数据转换为DataFrame格式。"""
+        if not data:
+            return pd.DataFrame()
+        return pd.DataFrame([{
+            '日期': datetime.now().strftime('%Y-%m-%d'),
+            '开盘': data.get('open', 0),
+            '收盘': data.get('price', 0),
+            '最高': data.get('high', 0),
+            '最低': data.get('low', 0),
+            '成交量': data.get('volume', 0),
+            '成交额': data.get('turnover', 0),
+        }])
+
+    def _convert_cn_a_to_yahoo_symbol(self, symbol):
+        """将A股代码转换为Yahoo Finance格式。
+
+        转换规则：
+        - sh600519 → 600519.SS (上海)
+        - sz000001 → 000001.SZ (深圳)
+
+        Args:
+            symbol: A股代码，格式为 sh600519 或 sz000001
+
+        Returns:
+            Yahoo格式代码如 600519.SS，或 None（无效格式）
+        """
+        if not symbol:
+            return None
+        symbol = symbol.strip().lower()
+        if symbol.startswith('sh'):
+            return symbol[2:] + '.SS'
+        elif symbol.startswith('sz'):
+            return symbol[2:] + '.SZ'
+        return None
+
+    def _get_cn_a_data_from_yahoo(self, ticker, start_date, end_date):
+        """使用Yahoo Finance获取A股历史数据。
+
+        Args:
+            ticker: Yahoo格式代码，如 600519.SS
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            DataFrame with columns: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额
+            或空DataFrame（获取失败）
+        """
+        if yf is None:
+            return pd.DataFrame()
+        try:
+            ticker_obj = yf.Ticker(ticker)
+            df = ticker_obj.history(start=start_date, end=end_date, timeout=15)
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            result = pd.DataFrame({
+                '日期': df.index.strftime('%Y-%m-%d'),
+                '开盘': df['Open'].round(2),
+                '收盘': df['Close'].round(2),
+                '最高': df['High'].round(2),
+                '最低': df['Low'].round(2),
+                '成交量': df['Volume'].astype(int),
+                '成交额': (df['Close'] * df['Volume']).round(0).astype(int)
+            })
+
+            return result
+
+        except Exception:
+            return pd.DataFrame()
 
     def _load_config(self):
         """加载JSON配置文件"""
@@ -706,6 +788,13 @@ class WebStockAnalyzer:
                     end_date=end_date,
                     adjust="qfq"
                 )
+                # Browser fallback if AkShare fails
+                if (stock_data is None or stock_data.empty) and fetch_stock_via_browser:
+                    self.logger.info(f"AkShare A股获取失败，尝试浏览器备用: {display_code}")
+                    browser_data = fetch_stock_via_browser(ak_symbol)
+                    if browser_data:
+                        stock_data = self._browser_data_to_df(browser_data)
+                        self.logger.info(f"✓ 浏览器备用数据成功: {display_code}")
             elif market == 'hk':
                 stock_data = self._call_akshare_api(
                     'stock_hk_hist',
