@@ -58,8 +58,33 @@ task_lock = threading.Lock()
 sse_clients = {}    # 存储SSE客户端连接
 sse_lock = threading.Lock()
 
+# 全盘扫描相关
+scan_sessions = {}   # 扫描会话存储 {scan_session_id: {...}}
+scan_sessions_lock = threading.Lock()
+scan_executor = ThreadPoolExecutor(max_workers=5)
+
 # 线程池用于并发处理
 executor = ThreadPoolExecutor(max_workers=4)
+
+# SSE事件类型常量
+LOG_EVENT = 'log'
+PROGRESS_EVENT = 'progress'
+SCORES_UPDATE_EVENT = 'scores_update'
+DATA_QUALITY_EVENT = 'data_quality_update'
+PARTIAL_RESULT_EVENT = 'partial_result'
+FINAL_RESULT_EVENT = 'final_result'
+BATCH_RESULT_EVENT = 'batch_result'
+ANALYSIS_COMPLETE_EVENT = 'analysis_complete'
+ANALYSIS_ERROR_EVENT = 'analysis_error'
+AI_STREAM_EVENT = 'ai_stream'
+ERROR_EVENT = 'error'
+HEARTBEAT_EVENT = 'heartbeat'
+
+# 全盘扫描SSE事件类型
+SCAN_PROGRESS = 'scan_progress'
+SCAN_STOCK_RESULT = 'scan_stock_result'
+SCAN_COMPLETE = 'scan_complete'
+SCAN_ERROR = 'scan_error'
 
 # 配置日志 - 只输出到命令行
 logging.basicConfig(
@@ -1061,6 +1086,7 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
                 <div class="tabs">
                     <button class="tab active" onclick="switchTab('single')">📈 单只分析</button>
                     <button class="tab" onclick="switchTab('batch')">📊 批量分析</button>
+                    <button class="tab" onclick="switchTab('fullscan')">🔭 全盘扫描</button>
                 </div>
 
                 <!-- Single Stock Analysis -->
@@ -1111,6 +1137,60 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
                     </div>
                     
                     <div id="currentStock" style="display: none; margin-top: 12px; color: #6c757d; font-size: 12px; font-style: italic;"></div>
+                </div>
+
+                <!-- Full-Market Scan -->
+                <div id="fullscanTab" class="tab-content">
+                    <div class="form-group">
+                        <label for="marketFilter">市场板块</label>
+                        <select id="marketFilter" class="form-control">
+                            <option value="all">全部</option>
+                            <option value="shanghai">沪市主板</option>
+                            <option value="shenzhen">深市A股</option>
+                            <option value="gem">创业板</option>
+                            <option value="star">科创板</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="minScore">最低得分阈值</label>
+                        <input type="number" id="minScore" class="form-control" value="85" min="0" max="100" step="1">
+                    </div>
+
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+                        <button id="startScanBtn" class="btn btn-primary" onclick="startFullScan()">🔍 开始扫描</button>
+                        <button id="cancelScanBtn" class="btn btn-secondary" onclick="cancelFullScan()" style="display: none;">⏹ 停止扫描</button>
+                    </div>
+
+                    <div id="scanProgress" class="progress-bar">
+                        <div class="progress-bar-fill"></div>
+                    </div>
+
+                    <div id="scanStatus" style="margin: 8px 0; color: #6c757d; font-size: 12px;"></div>
+
+                    <div id="scanResultsContainer" style="display: none; margin-top: 16px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                            <h4 style="color: #2c3e50;">扫描结果</h4>
+                            <button class="btn btn-secondary" onclick="exportScanResults()" style="padding: 4px 12px; font-size: 12px;">📤 导出CSV</button>
+                        </div>
+                        <div style="overflow-x: auto;">
+                            <table id="scanResultsTable" style="width: 100%; border-collapse: collapse;">
+                                <thead>
+                                    <tr style="background: #f8f9fa;">
+                                        <th style="padding: 10px; text-align: left; cursor: pointer;" onclick="sortScanResults('score')">排名</th>
+                                        <th style="padding: 10px; text-align: left;">代码</th>
+                                        <th style="padding: 10px; text-align: left;">名称</th>
+                                        <th style="padding: 10px; text-align: left; cursor: pointer;" onclick="sortScanResults('score')">得分</th>
+                                        <th style="padding: 10px; text-align: left;">价格</th>
+                                        <th style="padding: 10px; text-align: left; cursor: pointer;" onclick="sortScanResults('change_pct')">涨跌幅</th>
+                                        <th style="padding: 10px; text-align: left;">建议</th>
+                                        <th style="padding: 10px; text-align: left;">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="scanResultsBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Log Container -->
@@ -1203,7 +1283,11 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
         let isAnalyzing = false;
         let sseConnection = null;
         let currentClientId = null;
-        const API_BASE = '';  // Flask server base URL
+        const API_BASE = '';
+        let currentScanSessionId = null;
+        let currentScanResults = [];
+        let scanSortColumn = 'score';
+        let scanSortDesc = true;
         
         // 配置marked.js
         if (typeof marked !== 'undefined') {
@@ -1407,9 +1491,15 @@ MAIN_TEMPLATE_SSE = r"""<!DOCTYPE html>
                     break;
                     
                 case 'heartbeat':
-                    // 心跳，不需要处理
                     break;
-                    
+
+                case 'scan_progress':
+                case 'scan_stock_result':
+                case 'scan_complete':
+                case 'scan_error':
+                    handleScanMessage(data);
+                    break;
+
                 default:
                     console.log('未知SSE事件:', eventType, eventData);
             }
@@ -2293,6 +2383,121 @@ ${aiAnalysis}
             return '较差';
         }
 
+        function escHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+        }
+
+        async function startFullScan() {
+            const marketFilter = document.getElementById('marketFilter').value;
+            const minScore = parseFloat(document.getElementById('minScore').value) || 85;
+            if (!currentClientId) {
+                addLog('SSE未连接，无法启动扫描', 'error');
+                return;
+            }
+            document.getElementById('startScanBtn').disabled = true;
+            document.getElementById('cancelScanBtn').style.display = 'inline-flex';
+            document.getElementById('scanProgress').style.display = 'block';
+            document.getElementById('scanProgress').querySelector('.progress-bar-fill').style.width = '0%';
+            document.getElementById('scanStatus').textContent = '正在启动扫描...';
+            document.getElementById('scanResultsContainer').style.display = 'none';
+            currentScanResults = [];
+            try {
+                const resp = await fetch(`${API_BASE}/api/fullscan_start`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({market_filter: marketFilter, min_score: minScore, client_id: currentClientId})
+                });
+                const json = await resp.json();
+                if (!json.success) throw new Error(json.error);
+                currentScanSessionId = json.scan_session_id;
+                addLog('🔍 全盘扫描已启动', 'header');
+            } catch(e) {
+                addLog('❌ 启动扫描失败: ' + e.message, 'error');
+                document.getElementById('startScanBtn').disabled = false;
+                document.getElementById('cancelScanBtn').style.display = 'none';
+            }
+        }
+
+        async function cancelFullScan() {
+            if (!currentScanSessionId) return;
+            try {
+                await fetch(`${API_BASE}/api/fullscan_cancel/${currentScanSessionId}`, {method: 'POST'});
+                addLog('⏹ 扫描已请求停止', 'warning');
+            } catch(e) {}
+        }
+
+        function handleScanMessage(data) {
+            const et = data.event;
+            const d = data.data;
+            if (et === 'scan_progress') {
+                const pct = d.percent || 0;
+                document.getElementById('scanProgress').querySelector('.progress-bar-fill').style.width = pct + '%';
+                document.getElementById('scanStatus').textContent = escHtml(d.message || '') + ` (${d.stocks_done}/${d.stocks_total}) 高分股: ${d.high_score_count}`;
+            } else if (et === 'scan_stock_result') {
+                currentScanResults.push(d);
+                renderScanTable();
+            } else if (et === 'scan_complete') {
+                document.getElementById('scanStatus').textContent = `扫描完成，共扫描 ${d.total_scanned} 只，高分股 ${d.high_score_count} 只`;
+                document.getElementById('startScanBtn').disabled = false;
+                document.getElementById('cancelScanBtn').style.display = 'none';
+                addLog('✅ 全盘扫描完成', 'success');
+            } else if (et === 'scan_error') {
+                addLog('❌ 扫描错误: ' + escHtml(d.message), 'error');
+                document.getElementById('startScanBtn').disabled = false;
+                document.getElementById('cancelScanBtn').style.display = 'none';
+            }
+        }
+
+        function sortScanResults(column) {
+            if (scanSortColumn === column) {
+                scanSortDesc = !scanSortDesc;
+            } else {
+                scanSortColumn = column;
+                scanSortDesc = true;
+            }
+            currentScanResults.sort((a, b) => {
+                const va = a[column], vb = b[column];
+                if (typeof va === 'number' && typeof vb === 'number') {
+                    return scanSortDesc ? vb - va : va - vb;
+                }
+                return scanSortDesc ? String(vb).localeCompare(String(va)) : String(va).localeCompare(String(vb));
+            });
+            renderScanTable();
+        }
+
+        function renderScanTable() {
+            const container = document.getElementById('scanResultsContainer');
+            const tbody = document.getElementById('scanResultsBody');
+            container.style.display = 'block';
+            tbody.innerHTML = '';
+            currentScanResults.forEach((r, i) => {
+                const tr = document.createElement('tr');
+                tr.style.borderBottom = '1px solid #e9ecef';
+                tr.innerHTML = `<td style="padding:8px;">${i + 1}</td><td style="padding:8px;">${escHtml(r.stock_code)}</td><td style="padding:8px;">${escHtml(r.name || r.stock_code)}</td><td style="padding:8px;font-weight:600;">${r.score}</td><td style="padding:8px;">${r.price ? r.price.toFixed(2) : '--'}</td><td style="padding:8px;">${r.change_pct ? r.change_pct.toFixed(2) + '%' : '--'}</td><td style="padding:8px;">${escHtml(r.recommendation)}</td><td style="padding:8px;"><button class="btn btn-secondary" onclick="deepAnalyzeFromScan('${escHtml(r.stock_code)}')" style="padding:2px 8px;font-size:11px;">深度分析</button></td>`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function deepAnalyzeFromScan(stockCode) {
+            switchTab('single');
+            document.getElementById('stockCode').value = stockCode;
+            analyzeSingleStock();
+        }
+
+        function exportScanResults() {
+            if (!currentScanResults.length) return;
+            const header = '\uFEFF排名,代码,名称,得分,价格,涨跌幅,RSI,MACD信号,成交量状态,建议\n';
+            const rows = currentScanResults.map((r, i) => `${i+1},${r.stock_code},${r.name || ''},${r.score},${r.price || ''},${r.change_pct || ''},${r.rsi || ''},${r.macd_signal || ''},${r.volume_status || ''},${r.recommendation || ''}`).join('\n');
+            const blob = new Blob([header + rows], {type: 'text/csv;charset=utf-8'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `scan_results_${Date.now()}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             addLog('🚀 现代股票分析系统已启动 (SSE流式版)', 'success');
@@ -2554,6 +2759,47 @@ class StreamingAnalyzer:
             'content': content,
             'sequence': StreamingAnalyzer.stream_sequence
         })
+
+    def send_scan_progress(self, percent, message, current_stock, stocks_done, stocks_total, high_score_count):
+        """发送全盘扫描进度"""
+        sse_manager.send_to_client(self.client_id, SCAN_PROGRESS, {
+            'percent': percent,
+            'message': message,
+            'current_stock': current_stock,
+            'stocks_done': stocks_done,
+            'stocks_total': stocks_total,
+            'high_score_count': high_score_count
+        })
+
+    def send_scan_stock_result(self, stock_code, score, price, change_pct, rsi, macd_signal, volume_status, recommendation, name=None):
+        """发送扫描结果"""
+        sse_manager.send_to_client(self.client_id, SCAN_STOCK_RESULT, {
+            'stock_code': stock_code,
+            'name': name,
+            'score': score,
+            'price': price,
+            'change_pct': change_pct,
+            'rsi': rsi,
+            'macd_signal': macd_signal,
+            'volume_status': volume_status,
+            'recommendation': recommendation
+        })
+
+    def send_scan_complete(self, total_scanned, high_score_count, scan_session_id):
+        """发送扫描完成"""
+        sse_manager.send_to_client(self.client_id, SCAN_COMPLETE, {
+            'total_scanned': total_scanned,
+            'high_score_count': high_score_count,
+            'scan_session_id': scan_session_id
+        })
+
+    def send_scan_error(self, message, stock_code=None):
+        """发送扫描错误"""
+        sse_manager.send_to_client(self.client_id, SCAN_ERROR, {
+            'message': message,
+            'stock_code': stock_code
+        })
+
 
 def analyze_stock_streaming(stock_code, enable_streaming, client_id, position_cost=None):
     """流式股票分析"""
@@ -3139,6 +3385,151 @@ def batch_analyze():
             'success': False,
             'error': str(e)
         }), 500
+
+
+@app.route('/api/fullscan_start', methods=['POST'])
+@require_auth
+def fullscan_start():
+    """启动全盘扫描"""
+    try:
+        if not analyzer:
+            return jsonify({'success': False, 'error': '分析器未初始化'}), 500
+
+        data = request.json or {}
+        market_filter = data.get('market_filter', 'all')
+        min_score = float(data.get('min_score', 85))
+        client_id = data.get('client_id')
+
+        if not client_id:
+            return jsonify({'success': False, 'error': '缺少客户端ID'}), 400
+
+        scan_session_id = f"scan_{uuid.uuid4().hex[:12]}"
+
+        with scan_sessions_lock:
+            scan_sessions[scan_session_id] = {
+                'start_time': datetime.now(),
+                'status': 'running',
+                'client_id': client_id,
+                'filters': {'market_filter': market_filter, 'min_score': min_score},
+                'stocks_total': 0,
+                'stocks_done': 0,
+                'progress_percent': 0,
+                'high_score_stocks': [],
+                'high_score_count': 0,
+                'error_message': None
+            }
+
+        def run_fullscan():
+            from web_stock_analyzer import MarketStockScanner
+            scanner = MarketStockScanner(analyzer.config)
+            streamer = StreamingAnalyzer(client_id)
+            try:
+                all_stocks = scanner.get_all_stocks(market_filter)
+                total = len(all_stocks)
+                with scan_sessions_lock:
+                    scan_sessions[scan_session_id]['stocks_total'] = total
+
+                streamer.send_scan_progress(0, f'开始扫描 {total} 只股票...', '', 0, total, 0)
+
+                for batch_start in range(0, total, 20):
+                    with scan_sessions_lock:
+                        sess = scan_sessions.get(scan_session_id, {})
+                        if sess.get('status') == 'cancelled':
+                            streamer.send_scan_error('扫描已被取消', None)
+                            return
+
+                    batch_end = min(batch_start + 20, total)
+                    batch_stocks = all_stocks[batch_start:batch_end]
+                    batch_results = scanner.scan_batch(batch_stocks, streamer, scan_session_id, min_score)
+
+                    with scan_sessions_lock:
+                        sess = scan_sessions[scan_session_id]
+                        sess['stocks_done'] = batch_end
+                        sess['progress_percent'] = int(batch_end / total * 100)
+                        for r in batch_results:
+                            sess['high_score_stocks'].append(r)
+                        sess['high_score_stocks'].sort(key=lambda x: x['score'], reverse=True)
+                        sess['high_score_stocks'] = sess['high_score_stocks'][:100]
+                        sess['high_score_count'] = len(sess['high_score_stocks'])
+
+                    import random
+                    time.sleep(random.uniform(5, 8))
+
+                with scan_sessions_lock:
+                    scan_sessions[scan_session_id]['status'] = 'completed'
+
+                streamer.send_scan_complete(batch_end, len(batch_results), scan_session_id)
+
+            except Exception as e:
+                logger.error(f"全盘扫描失败: {e}")
+                with scan_sessions_lock:
+                    scan_sessions[scan_session_id]['status'] = 'failed'
+                    scan_sessions[scan_session_id]['error_message'] = str(e)
+                streamer.send_scan_error(str(e), None)
+
+        scan_executor.submit(run_fullscan)
+
+        return jsonify({
+            'success': True,
+            'scan_session_id': scan_session_id,
+            'message': '全盘扫描已启动'
+        })
+
+    except Exception as e:
+        logger.error(f"启动全盘扫描失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/fullscan_status/<scan_id>', methods=['GET'])
+@require_auth
+def fullscan_status(scan_id):
+    """获取扫描状态"""
+    with scan_sessions_lock:
+        sess = scan_sessions.get(scan_id)
+
+    if not sess:
+        return jsonify({'success': False, 'error': '扫描会话不存在'}), 404
+
+    return jsonify({
+        'success': True,
+        'status': sess['status'],
+        'stocks_total': sess['stocks_total'],
+        'stocks_done': sess['stocks_done'],
+        'progress_percent': sess['progress_percent'],
+        'high_score_count': sess['high_score_count'],
+        'error_message': sess.get('error_message')
+    })
+
+
+@app.route('/api/fullscan_results/<scan_id>', methods=['GET'])
+@require_auth
+def fullscan_results(scan_id):
+    """获取扫描结果"""
+    with scan_sessions_lock:
+        sess = scan_sessions.get(scan_id)
+
+    if not sess:
+        return jsonify({'success': False, 'error': '扫描会话不存在'}), 404
+
+    return jsonify({
+        'success': True,
+        'high_score_stocks': sess['high_score_stocks']
+    })
+
+
+@app.route('/api/fullscan_cancel/<scan_id>', methods=['POST'])
+@require_auth
+def fullscan_cancel(scan_id):
+    """取消扫描"""
+    with scan_sessions_lock:
+        sess = scan_sessions.get(scan_id)
+
+    if not sess:
+        return jsonify({'success': False, 'error': '扫描会话不存在'}), 404
+
+    sess['status'] = 'cancelled'
+    return jsonify({'success': True, 'message': '扫描已取消'})
+
 
 @app.route('/api/task_status/<stock_code>', methods=['GET'])
 @require_auth

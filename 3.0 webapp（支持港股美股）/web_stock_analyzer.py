@@ -5170,5 +5170,299 @@ class MAMACrossStrategy(BacktestEngine):
         return signals
 
 
+def normalize_stock_code(code):
+    """规范化A股代码，返回(code, market)"""
+    s = str(code or '').strip().lower()
+    if s.startswith('sh'):
+        return s[2:], 'SH'
+    if s.startswith('sz'):
+        return s[2:], 'SZ'
+    if s.startswith('gem') or s.startswith('cyb'):
+        return re.sub(r'\D', '', s), 'GEM'
+    if s.startswith('star') or s.startswith('kc'):
+        return re.sub(r'\D', '', s), 'STAR'
+    digits = re.sub(r'\D', '', s)
+    if len(digits) == 6:
+        if digits.startswith('6'):
+            return digits, 'SH'
+        if digits.startswith(('0', '3')):
+            return digits, 'SZ'
+        if digits.startswith('4') or digits.startswith('8'):
+            return digits, 'BJ'
+    return code, 'SH'
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class MarketTechnicalParams:
+    ma_periods: tuple = (5, 10, 20, 60)
+    rsi_period: int = 14
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    bb_period: int = 20
+    bb_std: float = 2.0
+    obv_ma_period: int = 10
+    atr_period: int = 14
+    stochastic_period: int = 14
+
+
+class MarketStockAnalyzer:
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.params = MarketTechnicalParams()
+        self.logger = logging.getLogger(__name__)
+
+    def get_stock_data(self, stock_code):
+        """获取股票数据，优先AkShare，失败则用yfinance"""
+        try:
+            import akshare as ak
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=180)).strftime('%Y%m%d')
+            code, market = normalize_stock_code(stock_code)
+            df = ak.stock_zh_a_hist(symbol=code, period='daily', start_date=start_date, end_date=end_date, adjust='qfq')
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+        try:
+            code, market = normalize_stock_code(stock_code)
+            ticker = code + '.SS' if market == 'SH' else code + '.SZ'
+            ticker_obj = yf.Ticker(ticker)
+            hist = ticker_obj.history(period='3mo', timeout=15)
+            if hist is None or hist.empty:
+                return pd.DataFrame()
+            result = pd.DataFrame({
+                '日期': hist.index.strftime('%Y-%m-%d'),
+                '开盘': hist['Open'].round(2),
+                '收盘': hist['Close'].round(2),
+                '最高': hist['High'].round(2),
+                '最低': hist['Low'].round(2),
+                '成交量': hist['Volume'].astype(int)
+            })
+            return result
+        except Exception:
+            return pd.DataFrame()
+
+    def calculate_indicators(self, data):
+        """计算技术指标"""
+        if data is None or data.empty:
+            return {}
+        close = pd.to_numeric(data['收盘'], errors='coerce').dropna()
+        volume = pd.to_numeric(data.get('成交量', pd.Series(dtype=float)), errors='coerce').dropna()
+        if close.empty:
+            return {}
+        close = close.values
+        ma_values = {}
+        for period in self.params.ma_periods:
+            if len(close) >= period:
+                ma_values[f'ma{period}'] = np.mean(close[-period:])
+        rsi = 50.0
+        if len(close) >= self.params.rsi_period:
+            deltas = np.diff(close[-self.params.rsi_period:])
+            ups = deltas[deltas > 0].sum() if len(deltas[deltas > 0]) > 0 else 0
+            dns = abs(deltas[deltas < 0].sum()) if len(deltas[deltas < 0]) > 0 else 0
+            rs = ups / dns if dns > 0 else 100
+            rsi = 100 - (100 / (1 + rs)) if rs != 0 else 50
+        macd_fast = 12
+        macd_slow = 26
+        macd_signal = 9
+        ema_fast = np.mean(close[-macd_fast:]) if len(close) >= macd_fast else close[-1]
+        ema_slow = np.mean(close[-macd_slow:]) if len(close) >= macd_slow else close[-1]
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line * 0.9
+        macd_histogram = macd_line - signal_line
+        bb_upper = np.mean(close[-20:]) + 2 * np.std(close[-20:]) if len(close) >= 20 else close[-1] * 1.1
+        bb_lower = np.mean(close[-20:]) - 2 * np.std(close[-20:]) if len(close) >= 20 else close[-1] * 0.9
+        obv = 0
+        if len(volume) > 1 and len(close) > 1:
+            for i in range(1, min(len(volume), len(close))):
+                if close[i] > close[i - 1]:
+                    obv += volume.iloc[i] if hasattr(volume, 'iloc') else volume[i]
+                else:
+                    obv -= volume.iloc[i] if hasattr(volume, 'iloc') else volume[i]
+        obv_ma = np.mean(volume[-10:]) if len(volume) >= 10 else np.mean(volume)
+        return {
+            'close': close[-1] if len(close) > 0 else 0,
+            'ma5': ma_values.get('ma5', 0),
+            'ma10': ma_values.get('ma10', 0),
+            'ma20': ma_values.get('ma20', 0),
+            'ma60': ma_values.get('ma60', 0),
+            'rsi': rsi,
+            'macd_line': macd_line,
+            'signal_line': signal_line,
+            'macd_histogram': macd_histogram,
+            'bb_upper': bb_upper,
+            'bb_lower': bb_lower,
+            'bb_middle': np.mean(close[-20:]) if len(close) >= 20 else close[-1],
+            'obv': obv,
+            'obv_ma': obv_ma
+        }
+
+    def calculate_score(self, indicators):
+        """计算综合评分"""
+        if not indicators:
+            return 0
+        score = 0
+        close = indicators.get('close', 0)
+        ma5 = indicators.get('ma5', 0)
+        ma20 = indicators.get('ma20', 0)
+        ma60 = indicators.get('ma60', 0)
+        rsi = indicators.get('rsi', 50)
+        macd_hist = indicators.get('macd_histogram', 0)
+        obv = indicators.get('obv', 0)
+        obv_ma = indicators.get('obv_ma', 1)
+        if close > ma5 > ma20 > ma60:
+            score += 30
+        elif close > ma5 and ma5 > ma20:
+            score += 20
+        elif close > ma5:
+            score += 10
+        if 30 < rsi < 70:
+            score += 20
+        elif rsi <= 30:
+            score += 15
+        elif rsi >= 70:
+            score += 10
+        if macd_hist > 0:
+            score += 20
+        elif macd_hist > -0.5:
+            score += 10
+        vol_ratio = obv / obv_ma if obv_ma and obv_ma != 0 else 1
+        if vol_ratio > 1.5:
+            score += 30
+        elif vol_ratio > 1.0:
+            score += 20
+        else:
+            score += 10
+        if obv > obv_ma:
+            score += 5
+        else:
+            score -= 5
+        return min(score, 100)
+
+    def get_recommendation(self, score):
+        """根据评分返回建议"""
+        if score >= 80:
+            return '强烈推荐买入'
+        elif score >= 60:
+            return '建议买入'
+        elif score >= 40:
+            return '建议观望'
+        elif score >= 20:
+            return '建议卖出'
+        else:
+            return '强烈建议卖出'
+
+    def analyze_stock(self, stock_code):
+        """分析单只股票"""
+        data = self.get_stock_data(stock_code)
+        if data is None or data.empty:
+            return None
+        indicators = self.calculate_indicators(data)
+        score = self.calculate_score(indicators)
+        recommendation = self.get_recommendation(score)
+        close = indicators.get('close', 0)
+        change_pct = 0
+        if '收盘' in data.columns and len(data) > 1:
+            prev_close = float(data['收盘'].iloc[-2])
+            if prev_close > 0:
+                change_pct = ((close - prev_close) / prev_close) * 100
+        return {
+            'stock_code': stock_code,
+            'score': score,
+            'price': close,
+            'change_pct': change_pct,
+            'rsi': indicators.get('rsi', 50),
+            'macd_signal': '金叉' if indicators.get('macd_histogram', 0) > 0 else '死叉',
+            'volume_status': '放量' if indicators.get('obv', 0) > indicators.get('obv_ma', 0) else '缩量',
+            'recommendation': recommendation
+        }
+
+
+class MarketStockScanner:
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.analyzer = MarketStockAnalyzer(config)
+
+    def get_all_stocks(self, market_filter='all'):
+        """获取全市场股票列表"""
+        import akshare as ak
+        stocks = []
+        try:
+            if market_filter in ('all', 'shanghai'):
+                sh = ak.stock_info_sh_name_code(symbol='沪市主板')
+                if sh is not None:
+                    for _, row in sh.iterrows():
+                        stocks.append(str(row.iloc[0]))
+        except Exception:
+            pass
+        try:
+            if market_filter in ('all', 'shenzhen', 'gem'):
+                sz = ak.stock_info_sz_name_code(symbol='深市A股')
+                if sz is not None:
+                    for _, row in sz.iterrows():
+                        stocks.append(str(row.iloc[0]))
+        except Exception:
+            pass
+        try:
+            if market_filter in ('all', 'gem'):
+                cyb = ak.stock_info_sz_name_code(symbol='创业板')
+                if cyb is not None:
+                    for _, row in cyb.iterrows():
+                        stocks.append(str(row.iloc[0]))
+        except Exception:
+            pass
+        try:
+            if market_filter in ('all', 'star'):
+                star = ak.stock_info_sh_name_code(symbol='科创板')
+                if star is not None:
+                    for _, row in star.iterrows():
+                        stocks.append(str(row.iloc[0]))
+        except Exception:
+            pass
+        return stocks
+
+    def analyze_stock_safe(self, code, retries=3):
+        """带重试的分析"""
+        for attempt in range(retries):
+            try:
+                return self.analyzer.analyze_stock(code)
+            except Exception:
+                if attempt < retries - 1:
+                    time.sleep(0.5)
+                else:
+                    return None
+        return None
+
+    def scan_batch(self, stocks, streamer, scan_session_id, min_score):
+        """批量扫描"""
+        results = []
+        total = len(stocks)
+        for i, code in enumerate(stocks):
+            result = self.analyze_stock_safe(code)
+            if result is None:
+                continue
+            if result['score'] >= min_score:
+                results.append(result)
+                streamer.send_scan_stock_result(
+                    result['stock_code'],
+                    result['score'],
+                    result['price'],
+                    result['change_pct'],
+                    result['rsi'],
+                    result['macd_signal'],
+                    result['volume_status'],
+                    result['recommendation']
+                )
+            percent = int((i + 1) / total * 100)
+            streamer.send_scan_progress(percent, f'正在扫描 {code}', code, i + 1, total, len(results))
+            import random
+            time.sleep(random.uniform(0.5, 1.5))
+        return results
+
+
 if __name__ == "__main__":
     main()
