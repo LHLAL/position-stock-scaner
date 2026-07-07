@@ -1,130 +1,193 @@
-# 🚀 AI增强股票分析系统 (Enhanced AI Stock Analysis System)
+# 🚀 AI 增强股票分析系统
 
-## 📋 项目简介
-
-AI 增强的股票分析系统，支持 **A股 / 港股 / 美股**，集成多维度财务指标、技术指标、新闻情绪分析与 AI 深度解读。系统支持多种 AI 模型（OpenAI GPT、Claude、SiliconFlow 等），提供 Web 界面和桌面 GUI，具备 SSE 实时流式推送功能。
-
-> ⚠️ **版本说明**：当前生产版本为 `3.0 webapp（支持港股美股）/`。其他目录为历史存档。
-
-## 💰 请我喝奶茶
-
-如果这个项目对您有帮助，欢迎支持：
-🔗 [https://juanzen.linzefeng.top/](https://juanzen.linzefeng.top/)
+AI 增强的 A 股分析系统，集成多维技术指标、基本面评分、新闻情绪分析与 AI 深度解读。支持多种 AI 模型（OpenAI、Claude、SiliconFlow 等），提供 Web 界面 + SSE 实时流式推送。
 
 ## ✨ 核心特性
 
 ### 🎯 多维度分析
-- **25项核心财务指标**：盈利能力、偿债能力、营运能力、发展能力、市场表现
-- **技术面分析**：移动平均线、RSI、MACD、布林带、成交量分析
-- **市场情绪分析**：新闻、公告、研报情绪挖掘，支持100+条新闻分析
-- **AI智能解读**：多模型深度分析，提供专业投资建议
+- **技术面**：RSI、MACD、KDJ、布林带、CCI、OBV 等 20+ 指标
+- **基本面**：盈利能力、偿债能力、营运能力、发展能力、市场表现
+- **情绪面**：新闻、公告、研报情绪挖掘，支持 100+ 条新闻分析
+- **AI 解读**：多模型深度分析，提供专业投资建议
 
-### 🤖 AI能力支持
-- **多模型兼容**：OpenAI GPT、Claude、智谱AI、SiliconFlow（OpenAI 兼容）
-- **智能切换**：主备API自动切换，确保服务可用性
-- **流式推理**：实时AI分析过程展示，支持Server-Sent Events
-- **规则降级**：AI不可用时自动降级到高级规则分析
+### 🤖 AI 能力
+- **多模型**：OpenAI、Claude、智谱、SiliconFlow、DeepSeek、MiniMax
+- **主备切换**：API 自动降级，确保服务可用
+- **流式推理**：SSE 实时推送 AI 分析过程
+- **规则降级**：AI 不可用时自动降级到规则分析
 
-### 🌐 多端支持
-- **Web版本**：Flask + SSE，支持多用户并发，实时流式推送
-- **桌面版GUI**：PyQt6 启动器，可视化配置管理，一键打包 EXE
-- **批量分析**：支持多股票并发分析，线程池优化
-- **Docker部署**：容器化部署，支持一键启动（含 Nginx 反向代理）
+### 📈 量化信号
+- **四层信号系统**：L0 超短期 / L1 短期 / L2 中期 / L3 长期
+- **综合评分**：技术 40% + 基本面 40% + 情绪 20%
+- **策略生成**：基于量化信号的买卖策略建议
 
-### 🔐 企业级特性
-- **密码鉴权**：Web版支持密码保护和会话管理
-- **高并发**：线程池 + 异步处理 + 任务队列优化
-- **缓存机制**：智能数据缓存，减少API调用
-- **错误处理**：完善的异常处理和重试机制
+### 🔐 工程特性
+- **线程池**：`max_workers=4`，Flask `threaded=True` 并发处理
+- **数据缓存**：智能缓存减少 API 调用，端点冷却防限频
+- **密码鉴权**：Web 端支持密码保护 + 会话管理
+- **Docker 部署**：容器化一键启动
 
-## 🏗️ 版本目录
+## 🚀 快速开始
 
-| 目录 | 状态 | 说明 |
-|---|---|---|
-| `3.0 webapp（支持港股美股）/` | **PRODUCTION** | 当前稳定版本，支持港美股 |
-| `3.1 webapp/` | **WIP** | 开发中，还未完善请勿使用 |
-| `2.6 webapp（流式传输测试版）/` | 存档 | 历史版本 |
-| `2.5 webapp/` | 存档 | 历史版本 |
-| `2.0 win app/` | 存档 | 历史桌面版 |
-| `1.0/` | 存档 | 历史版本 |
+### 环境要求
 
-## 🚀 快速开始（3.0 生产版）
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) 包管理器
 
 ### 1. 进入目录
 
 ```bash
-cd "3.0 webapp（支持港股美股）/"
+cd "3.1重构版"
 ```
 
 ### 2. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-### 3. 准备配置文件
+### 3. 配置 API Key
 
 ```bash
-cp "config - 示例.json" config.json
+cp config.json config.json.bak  # 备份（如有）
 ```
 
-编辑 `config.json`，至少填写：
-- `api_keys`：你的 API Key
-- `ai.model_preference`：主模型（如 `openai` / `siliconflow`）
-- `ai.models`：模型名称
+编辑 `3.1重构版/config.json`，填入你的 API Key：
 
-详细说明见 `config-readme.md`。
+| 字段 | 说明 |
+|---|---|
+| `api_keys.openai` | OpenAI API Key |
+| `api_keys.siliconflow` | SiliconFlow API Key（免费可选） |
+| `api_keys.ollama` | Ollama（本地，无需 Key） |
+| `ai.model_preference` | 主模型：`ollama` / `openai` / `siliconflow` |
+
+> **最低启动**：配置 `api_keys.ollama` 任意值 + `ai.model_preference = "ollama"`，系统会降级到规则分析模式。
 
 ### 4. 启动服务
 
-**Web 版：**
 ```bash
-python flask_web_server.py
-# 访问 http://localhost:5000
+# 前台运行（开发调试）
+uv run python src/run.py
+
+# 或使用启动脚本
+bash start.sh           # 前台
+bash start.sh --bg      # 后台运行
 ```
 
-**桌面 GUI（推荐）：**
-```bash
-python desktop_gui_launcher.py
-```
-提供启动/停止服务、实时日志、配置中心、一键打开分析页面。
+访问 **http://localhost:5000**
 
-**Docker 部署：**
+### Docker 部署
+
 ```bash
-docker compose up -d --build
+cd "3.1重构版"
+docker build -t stock-scanner .
+docker run -p 5000:5000 stock-scanner
 ```
 
-**Windows EXE 打包：**
-```powershell
-pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+## 📁 项目结构
+
+```
+stock-scanner/
+├── 3.1重构版/                  # 当前活跃版本
+│   ├── src/
+│   │   ├── run.py              # Flask 入口
+│   │   ├── api/                # 路由层
+│   │   ├── core/               # 业务逻辑（分析器/信号/策略）
+│   │   ├── data/               # 数据源（注册表模式）
+│   │   ├── storage/            # SQLite 持久化
+│   │   └── repository/         # 数据仓储
+│   ├── templates/              # 前端页面
+│   ├── static/                 # CSS / JS
+│   ├── config.json             # 配置文件
+│   └── start.sh                # 启动脚本
+├── tests/                      # 测试
+├── docs/                       # 文档
+├── designs/                    # 设计文档
+└── cankao/                     # 参考项目（本地）
 ```
 
 ## 📊 股票代码格式
 
-## 📁 子项目与分支
-- `3.1 重构版/` – 采用模块化重构版本，功能仍在开发中。请参见 `3.1重构版/README.md`。
-- `stock_ai_analyst_v4/` – 后端分析器，支持多源数据和策略生成。
-- `tests/` – 单元与集成测试。
-- 其余文件夹为历史版本、文档或工具。
-
-### **Python 虚拟环境**
-
-> 本项目在根目录下预置了一个名为 `env/` 的 Python 虚拟环境，用于隔离依赖。请在安装任何包前先激活该环境：
->
-> ```bash
-> source env/bin/activate   # macOS / Linux
-> ```
->
-> 或者
->
-> ```bash
-> .\env\Scripts\activate   # Windows
-> ```
->
-> **激活后**，所有 `pip install` 操作都会在此环境中执行，确保在不同机器或 CI 上的一致性。
-
 系统自动识别市场：
-- A股：`600519` / `sh600519` / `600519.SH`
-- 港股：`00700` / `700` / `00700.HK` / `HK00700`
-- 美股：`AAPL` / `MSFT` / `105.MSFT`（AkShare 特殊格式）
+
+| 市场 | 格式 |
+|------|------|
+| A 股沪市 | `600519` / `sh600519` / `600519.SH` |
+| A 股深市 | `000001` / `sz000001` / `000001.SZ` |
+
+## 🔌 API 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/status` | 健康检查 |
+| GET | `/api/sse?client_id=xxx` | 打开 SSE 通道 |
+| POST | `/api/analyze_stream` | 单股票流式分析 |
+| POST | `/api/analyze` | 单股票同步分析 |
+| POST | `/api/batch_analyze_stream` | 批量流式（最多 10 只） |
+| GET | `/api/patrol/positions` | 持仓列表 |
+| POST | `/api/patrol/positions` | 添加持仓 |
+| GET | `/api/patrol/positions/quotes` | 批量获取报价 |
+
+**SSE 流程**：先 `GET /api/sse?client_id=xxx` → 再用相同 `client_id` POST 分析。
+
+## ⚙️ 配置
+
+`3.1重构版/config.json` 主要字段：
+
+```json
+{
+  "api_keys": { "openai": "", "siliconflow": "" },
+  "ai": {
+    "model_preference": "ollama",
+    "models": { "ollama": "minimax-m2.5:cloud" }
+  },
+  "analysis_weights": { "technical": 0.4, "fundamental": 0.4, "sentiment": 0.2 },
+  "cache": { "akshare_endpoint_cooldown_seconds": 90 }
+}
+```
+
+> ⚠️ **不要提交真实 API Key 到代码仓库。** `config.json` 已在 `.gitignore` 中。
+> 完整配置说明见 `3.1重构版/README.md`。
+
+## 📜 技术栈
+
+- **后端**：Flask + Python 3.10+
+- **数据源**：AkShare、腾讯、新浪、东方财富、同花顺（注册表模式）
+- **前端**：Vanilla JS + SSE + Plotly 图表
+- **缓存**：SQLite + TTL 缓存
+- **包管理**：uv
+- **AI**：OpenAI / Claude / SiliconFlow / DeepSeek / Ollama
+
+## 🏗️ 架构
+
+```
+Frontend (templates/)  ←SSE→  API Routes (src/api/)
+                                  ↓
+                            Core Logic (src/core/)
+                                  ↓
+               Data Layer (src/data/) — 注册表模式
+               Storage Layer (src/storage/) — SQLite
+```
+
+### 四层量化信号
+
+| 层级 | 周期 | 数据源 | 权重 |
+|------|------|--------|------|
+| L0 超短期 | 5 分钟 K 线 | 新浪 | 20% |
+| L1 短期 | 日 K (120 根) | 新浪/yfinance | 30% |
+| L2 中期 | 周 K (52 周) | AkShare | 25% |
+| L3 长期 | TTM 财报 | AkShare + 腾讯 | 25% |
+
+综合信号范围 `[-2, +2]`，正值看多，负值看空。
+
+## ⚠️ 注意事项
+
+- **SSE 要求 client_id 一致**：先连接 SSE 再用相同 ID 发起分析
+- **重复分析限流**：同一股票同时只能有一个进行中的任务
+- **NaN 处理**：分析器会在序列化前自动去除 NaN
+- **AkShare 限频**：端点冷却默认 90 秒
+- **A 股专用**：3.1 重构版仅支持 A 股（沪/深）
+
+## 💰 支持项目
+
+🔗 [请我喝奶茶](https://juanzen.linzefeng.top/)
