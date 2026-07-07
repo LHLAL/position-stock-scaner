@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>扫盘 · Stock Scanner 3.1 v1.1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=20260625-review-real">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/layout.css') }}?v=20260625-review-real">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/components.css') }}?v=20260625-review-real">
+<style>
+  /* 扫盘表专用：列宽 + sticky header */
+  table.scan {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--fs-caption);
+    font-family: var(--font-mono);
+  }
+  table.scan th, table.scan td {
+    padding: 6px var(--space-3);
+    text-align: right;
+    border-bottom: var(--border-w-1) solid var(--color-border-sub);
+  }
+  table.scan th {
+    color: var(--color-text-2);
+    background: var(--color-bg-1);
+    position: sticky; top: 0;
+    font-weight: var(--fw-medium);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    z-index: 1;
+  }
+  table.scan th:first-child, table.scan td:first-child,
+  table.scan th:nth-child(2), table.scan td:nth-child(2),
+  table.scan th:nth-child(3), table.scan td:nth-child(3),
+  table.scan th:last-child, table.scan td:last-child { text-align: left; }
+  table.scan td.num-cell { text-align: right; }
+  table.scan tbody tr { transition: background 80ms; }
+  table.scan tbody tr:hover { background: var(--color-bg-2); }
+  table.scan tbody tr:nth-child(even) { background: var(--table-zebra); }
+  table.scan .pos { color: var(--color-accent-2); }
+  table.scan .neg { color: var(--color-accent-3); }
+
+  /* 筛选条 */
+  .filter-bar {
+    display: flex; gap: var(--space-1);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-bg-1);
+    border-bottom: var(--border-w-1) solid var(--color-border);
+  }
+  .filter-bar button {
+    background: transparent; border: 0;
+    color: var(--color-text-2);
+    padding: 4px 12px;
+    font-size: var(--fs-caption);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .filter-bar button.on {
+    background: var(--color-accent-1);
+    color: var(--color-bg-0);
+    font-weight: var(--fw-medium);
+  }
+  .filter-bar button:hover:not(.on) { color: var(--color-text-1); background: var(--color-bg-2); }
+
+  /* 表容器：虚拟滚动 v1.1 推到 v1.2，先 max-height + overflow */
+  .table-wrap { max-height: calc(100vh - 56px - 36px - 44px - 48px - 24px); overflow: auto; }
+</style>
+<script>
+  // FOUC 防闪白：主题在样式表加载前应用
+  (function(){
+    try {
+      var t = localStorage.getItem('theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {}
+  })();
+</script>
+</head>
+<body data-page="scan">
+
+<div class="app">
+
+  <!-- Header（共享） -->
+  <header class="header" role="banner">
+    <button class="sidebar-toggle" type="button" aria-label="打开侧边栏" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6 H20 M4 12 H20 M4 18 H20"/></svg>
+    </button>
+    <div class="logo">AI 股票分析系统</div>
+    <div class="search" role="search"><span style="flex:1"></span><kbd>⌘</kbd><kbd>K</kbd></div>
+    <div class="pill">v3.1 重构版 · v1.1</div>
+    <div style="color:var(--color-text-2);font-size:var(--fs-caption);">SSE 实时</div>
+    <button class="icon-btn" aria-label="警报"><svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/></svg></button>
+    <button class="icon-btn" aria-label="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/></svg></button>
+  </header>
+
+  <!-- 场景导航（v1.1 新增） -->
+  <nav class="scenario-nav" role="navigation" aria-label="场景切换">
+    <a href="/v2">📊 单股深度</a>
+    <a href="/scan" class="active">🔍 扫盘</a>
+    <a href="/patrol">💼 持仓</a>
+    <a href="/signals">📡 市场信号</a>
+    <span class="nav-spacer"></span>
+    <span class="nav-meta" id="scan-meta">加载中…</span>
+  </nav>
+
+  <div class="sidebar-backdrop" data-sidebar-backdrop hidden></div>
+  <div class="main">
+
+    <!-- Sidebar（共享，由 sidebar.js 动态渲染） -->
+    <aside class="sidebar" id="sidebar" role="complementary" aria-label="自选股"></aside>
+
+    <!-- Workspace -->
+    <section class="workspace" role="main">
+
+      <!-- 筛选条 -->
+      <div class="filter-bar" id="scan-filters" role="tablist" aria-label="筛选策略"></div>
+
+      <!-- 主列 -->
+      <div class="col" id="col">
+        <div class="card" data-card="scan-table">
+          <div class="card-h">
+            <span class="title">📊 扫盘结果</span>
+            <span class="meta" id="scan-table-meta">点行跳深度分析</span>
+            <button class="btn-secondary" type="button" data-action="export-csv" title="导出当前扫盘结果为 CSV">导出 CSV</button>
+          </div>
+          <div class="card-b flush" data-slot="body" aria-live="polite">
+            <div data-state="normal">
+              <div class="table-wrap">
+                <table class="scan" aria-label="扫盘结果">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>代码</th>
+                      <th>名称</th>
+                      <th>涨幅</th>
+                      <th>现价</th>
+                      <th>量比</th>
+                      <th>北向</th>
+                      <th>题材</th>
+                    </tr>
+                  </thead>
+                  <tbody id="scan-tbody">
+                    <tr><td colspan="8" style="text-align: center; color: var(--color-text-3); padding: var(--space-4);">加载中…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div data-state="loading" hidden aria-busy="true" style="padding: var(--space-4);">
+              <div class="skeleton w50" style="margin-bottom: var(--space-2);"></div>
+              <div class="skeleton w90"></div>
+              <div class="skeleton w70"></div>
+              <div class="skeleton w90"></div>
+            </div>
+            <div data-state="empty" hidden></div>
+            <div data-state="error" hidden role="alert" style="padding: var(--space-4);">
+              <div class="error-block">
+                <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                <div class="head">扫盘失败</div>
+                <div class="code">E_SCREENER_FAIL</div>
+                <div class="actions">
+                  <button class="btn-danger" data-cta="retry">立即重试</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Status bar（共享） -->
+  <div class="statusbar" role="status" aria-live="polite">
+    <div style="display:flex;align-items:center;gap:6px;"><span class="dot" aria-hidden="true"></span><span data-sse-label>SSE 未连接</span></div>
+    <div data-status-time>--:--:--</div>
+    <div>模型 gpt-4o</div>
+    <div data-event-count>0 事件</div>
+    <div><kbd>⌘K</kbd> 命令</div>
+    <div class="spacer"></div>
+    <button class="theme-toggle" type="button" aria-label="切换浅色 / 深色主题" title="切换主题（浅 / 深）">
+      <span data-theme-icon-dark aria-hidden="true">🌙</span>
+      <span data-theme-icon-light aria-hidden="true" hidden>☀️</span>
+    </button>
+    <div style="color:var(--color-accent-2)" data-status-ready>就绪</div>
+  </div>
+</div>
+
+<!-- 共享 + 场景特定 JS -->
+<script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260625-review-real"></script>
+<script type="module" src="{{ url_for('static', filename='js/scan.js') }}?v=20260625-review-real"></script>
+</body>
+</html>

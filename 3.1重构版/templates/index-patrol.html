@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>持仓监控 · Stock Scanner 3.1 v1.1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=20260627-patrol">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/layout.css') }}?v=20260627-patrol">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/components.css') }}?v=20260627-patrol">
+<style>
+  /* KPI 顶条 */
+  .kpi-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+  .kpi {
+    background: var(--color-bg-1);
+    border: var(--border-w-1) solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    transition: border-color 150ms;
+  }
+  .kpi:hover { border-color: var(--color-border-2); }
+  .kpi .lbl {
+    color: var(--color-text-2);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .kpi .num {
+    font-family: var(--font-mono);
+    font-size: var(--fs-display);
+    font-weight: var(--fw-semibold);
+    color: var(--color-text-1);
+    margin-top: 4px;
+    line-height: 1.2;
+  }
+  .kpi .num.pos { color: var(--color-accent-2); }
+  .kpi .num.neg { color: var(--color-accent-3); }
+  .kpi .kpi-bar-inner {
+    height: 3px;
+    margin-top: var(--space-2);
+    background: var(--color-bg-2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .kpi .kpi-bar-inner > div {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 300ms;
+  }
+  .kpi .kpi-bar-inner.pos > div { background: var(--color-accent-2); }
+  .kpi .kpi-bar-inner.neg > div { background: var(--color-accent-3); }
+  .kpi .sub {
+    font-size: var(--fs-micro);
+    color: var(--color-text-3);
+    margin-top: 2px;
+  }
+
+  /* 持仓表 */
+  table.patrol {
+    width: 100%; border-collapse: collapse;
+    font-size: var(--fs-caption);
+  }
+  table.patrol th, table.patrol td {
+    padding: 10px var(--space-2);
+    text-align: right;
+    border-bottom: var(--border-w-1) solid var(--color-border-sub);
+    white-space: nowrap;
+  }
+  table.patrol th {
+    color: var(--color-text-2);
+    background: var(--color-bg-1);
+    position: sticky; top: 0; z-index: 1;
+    font-weight: var(--fw-medium);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding-top: 8px; padding-bottom: 8px;
+  }
+  table.patrol td { font-family: var(--font-mono); }
+  table.patrol tbody tr {
+    cursor: pointer;
+    transition: background 100ms;
+  }
+  table.patrol tbody tr:hover { background: var(--color-bg-2); }
+  table.patrol tbody tr:nth-child(even) { background: var(--table-zebra); }
+  table.patrol tbody tr.dragging { opacity: 0.4; }
+  table.patrol tbody tr.drag-over { border-top: 2px solid var(--color-accent-1); }
+
+  /* 拖拽手柄 */
+  table.patrol .col-drag { width: 20px; text-align: center; }
+  table.patrol .drag-handle {
+    cursor: grab;
+    color: var(--color-text-3);
+    font-size: 16px;
+    user-select: none;
+    text-align: center;
+    width: 20px;
+  }
+  table.patrol .drag-handle:active { cursor: grabbing; }
+
+  /* 代码 + 名称列（左对齐） */
+  table.patrol .col-code, table.patrol td:nth-child(2),
+  table.patrol .col-name, table.patrol td:nth-child(3) {
+    text-align: left;
+  }
+  table.patrol td:nth-child(3) .name {
+    font-family: var(--font-sans);
+    color: var(--color-text-1);
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-block;
+    vertical-align: middle;
+  }
+  table.patrol td:nth-child(2) { color: var(--color-accent-1); font-weight: var(--fw-medium); }
+
+  /* 数值列（右对齐 + 等宽） */
+  table.patrol .num-cell { font-variant-numeric: tabular-nums; }
+
+  /* 盈亏列专用 */
+  table.patrol td:nth-child(7) { font-weight: var(--fw-medium); }
+  table.patrol .pos { color: var(--color-accent-2); }
+  table.patrol .neg { color: var(--color-accent-3); }
+  table.patrol .pnl-bar {
+    display: inline-block;
+    width: 40px; height: 3px;
+    border-radius: 2px;
+    vertical-align: middle;
+    margin-left: 4px;
+  }
+  table.patrol .pnl-bar.pos { background: var(--color-accent-2); }
+  table.patrol .pnl-bar.neg { background: var(--color-accent-3); }
+
+  /* 操作列（紧凑） */
+  table.patrol .col-action { width: 70px; text-align: center; }
+  table.patrol .action-btn {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    color: var(--color-text-2);
+    cursor: pointer;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    transition: all 100ms;
+    margin: 0 1px;
+  }
+  table.patrol .action-btn:hover {
+    background: var(--color-bg-2);
+    color: var(--color-text-1);
+    border-color: var(--color-border-2);
+  }
+  table.patrol .action-btn-del:hover {
+    background: var(--color-accent-3);
+    color: #fff;
+    border-color: var(--color-accent-3);
+  }
+</style>
+<script>
+  // FOUC 防闪白：主题在样式表加载前应用
+  (function(){
+    try {
+      var t = localStorage.getItem('theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {}
+  })();
+</script>
+</head>
+<body data-page="patrol">
+
+<div class="app">
+
+  <header class="header" role="banner">
+    <button class="sidebar-toggle" type="button" aria-label="打开侧边栏" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6 H20 M4 12 H20 M4 18 H20"/></svg>
+    </button>
+    <div class="logo">AI 股票分析系统</div>
+    <div class="search" role="search"><span style="flex:1"></span><kbd>⌘</kbd><kbd>K</kbd></div>
+    <div class="pill">v3.1 重构版 · v1.1</div>
+    <div style="color:var(--color-text-2);font-size:var(--fs-caption);">SSE 实时</div>
+    <button class="icon-btn" aria-label="警报"><svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/></svg></button>
+    <button class="icon-btn" aria-label="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/></svg></button>
+  </header>
+
+  <nav class="scenario-nav" role="navigation" aria-label="场景切换">
+    <a href="/v2">📊 单股深度</a>
+    <a href="/scan">🔍 扫盘</a>
+    <a href="/patrol" class="active">💼 持仓</a>
+    <a href="/signals">📡 市场信号</a>
+    <span class="nav-spacer"></span>
+    <span class="nav-meta" id="patrol-meta">加载中…</span>
+  </nav>
+
+  <div class="sidebar-backdrop" data-sidebar-backdrop hidden></div>
+  <div class="main">
+
+    <aside class="sidebar" id="sidebar" role="complementary" aria-label="自选股">
+      <div class="group">
+        <div class="group-title"><span>持仓 (3)</span><span>+ 加</span></div>
+        <div class="row up active"><span class="bar"></span><span class="code">600519</span><span class="name">贵州茅台</span><span class="pct">+2.3%</span></div>
+        <div class="row down"><span class="bar"></span><span class="code">603000</span><span class="name">人民网</span><span class="pct">-1.2%</span></div>
+        <div class="row up"><span class="bar"></span><span class="code">000001</span><span class="name">平安银行</span><span class="pct">+0.5%</span></div>
+      </div>
+    </aside>
+
+    <section class="workspace" role="main">
+
+      <div class="col" id="col">
+        <!-- KPI 顶条 -->
+        <div class="kpi-bar" id="patrol-stats"></div>
+
+        <!-- 持仓表 -->
+        <div class="card" data-card="patrol-table">
+          <div class="card-h">
+            <span class="title">💼 持仓明细</span>
+            <span class="meta">点行进入深度分析</span>
+            <button class="btn-secondary" type="button" data-action="export-csv" title="导出当前持仓为 CSV">导出 CSV</button>
+          </div>
+          <div class="card-b flush" data-slot="body" aria-live="polite">
+            <div data-state="normal">
+              <table class="patrol" aria-label="持仓明细">
+                <thead>
+                  <tr>
+                    <th class="col-drag"></th>
+                    <th>代码</th><th>名称</th>
+                    <th>成本</th><th>现价</th>
+                    <th>市值</th><th>盈亏</th>
+                    <th>今日</th><th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="patrol-tbody">
+                  <tr><td colspan="9" style="text-align:center; color: var(--color-text-3); padding: var(--space-4);">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div data-state="loading" hidden aria-busy="true" style="padding: var(--space-4);">
+              <div class="skeleton w50" style="margin-bottom: var(--space-2);"></div>
+              <div class="skeleton w90"></div>
+              <div class="skeleton w70"></div>
+            </div>
+            <div data-state="empty" hidden></div>
+            <div data-state="error" hidden role="alert" style="padding: var(--space-4);">
+              <div class="error-block">
+                <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                <div class="head">持仓加载失败</div>
+                <div class="code">E_PATROL_FETCH</div>
+                <div class="actions">
+                  <button class="btn-danger" data-cta="retry">立即重试</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="statusbar" role="status" aria-live="polite">
+    <div style="display:flex;align-items:center;gap:6px;"><span class="dot" aria-hidden="true"></span><span data-sse-label>SSE 未连接</span></div>
+    <div data-status-time>--:--:--</div>
+    <div>模型 gpt-4o</div>
+    <div data-event-count>0 事件</div>
+    <div><kbd>⌘K</kbd> 命令</div>
+    <div class="spacer"></div>
+    <button class="theme-toggle" type="button" aria-label="切换浅色 / 深色主题" title="切换主题（浅 / 深）">
+      <span data-theme-icon-dark aria-hidden="true">🌙</span>
+      <span data-theme-icon-light aria-hidden="true" hidden>☀️</span>
+    </button>
+    <div style="color:var(--color-accent-2)" data-status-ready>就绪</div>
+  </div>
+</div>
+
+<script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260627-patrol"></script>
+<script type="module" src="{{ url_for('static', filename='js/patrol-page.js') }}?v=20260627-patrol"></script>
+</body>
+</html>

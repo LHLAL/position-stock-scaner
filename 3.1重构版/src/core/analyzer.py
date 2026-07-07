@@ -2,21 +2,27 @@
 
 封装股票分析逻辑，调用数据源获取行情数据，进行技术面/基本面/情绪面分析
 """
+from __future__ import annotations
 from datetime import datetime, timedelta
 import re
+import time
 import pandas as pd
 import numpy as np
+import logging
 from typing import Any
-
-from src.data.registry import DataSourceRegistry, registry
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from src.repository.stock_repo import stock_repo
 from src.core.strategy_generator import StrategyGenerator
 from src.core.chanlun import analyze_chanlun
+from src.core import indicators as ind  # v1.3: 拆分技术指标纯函数
+
+
+logger = logging.getLogger(__name__)
 
 
 class StockAnalyzer:
 
-    def __init__(self, data_registry: DataSourceRegistry | None = None):
-        self.registry = data_registry or registry
+    def __init__(self, registry=None):
         self._clear_proxy()
 
         self.weights = {
@@ -36,133 +42,68 @@ class StockAnalyzer:
 
     @staticmethod
     def normalize_stock_code(code: str) -> tuple:
-        """标准化股票代码，返回 (normalized_code, market, display_code)"""
+        """标准化股票代码，返回 (normalized_code, market, display_code)。
+
+        v1.3: 仅支持 A 股（SH/SZ），港美股已停支持。
+        """
         c = code.strip().upper()
         if c.startswith('SH') or c.startswith('SZ'):
             market = c[:2]
             raw = c[2:]
             return (raw, market, c)
-        if c.startswith('HK'):
-            return (c[2:], 'HK', c)
-        if '.HK' in c:
-            raw = c.replace('.HK', '')
-            return (raw, 'HK', c)
-        if '.SS' in c or '.SZ' in c:
+        if '.SS' in c or '.SH' in c or '.SZ' in c:
             parts = c.split('.')
-            market = 'SH' if parts[1] == 'SS' else 'SZ'
+            market = 'SH' if parts[1] in ('SS', 'SH') else 'SZ'
             return (parts[0], market, c)
         if re.match(r'^6\d{5}$', c):
             return (c, 'SH', c)
         if re.match(r'^(0|3)\d{5}$', c):
             return (c, 'SZ', c)
-        if re.match(r'^\d{5}$', c):
-            return (c, 'HK', c)
-        if c.isalpha():
-            return (c, 'US', c)
+        # 非 6 位 A 股数字代码 → 拒绝（v1.3 不再 fallback 为 HK/US）
         return (c, 'SH', c)
 
 
     def get_stock_name(self, code: str) -> str:
-        import akshare as ak
-        code_norm, market, _ = self.normalize_stock_code(code)
-        quote = self.registry.get_quote(code_norm, market)
-        if quote and quote.name:
-            return quote.name
-        try:
-            df = ak.stock_zh_a_spot_em()
-            row = df[df['\u4ee3\u7801'] == code_norm]
-            if not row.empty:
-                return str(row.iloc[0].get('\u540d\u79f0', code_norm))
-        except:
-            pass
-        return code
+        # v1.3: \u8d70 stock_repo\uff08SQLite \u4f18\u5148\uff09\uff0c\u4e0d\u518d import akshare
+        from src.repository.stock_repo import stock_repo
+        code_norm, _, _ = self.normalize_stock_code(code)
+        return stock_repo.get_name(code_norm)
 
     def get_stock_data(self, code: str, market: str = "SH", days: int = 365):
-        """获取历史K线数据: sina -> yfinance"""
-        import warnings
-        warnings.filterwarnings('ignore')
-
-        # 1. sina finance
-        try:
-            import requests
-            prefix = {'SH': 'sh', 'SZ': 'sz', 'HK': 'hk'}.get(market, 'sh')
-            url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                   f"CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=5&datalen=200")
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200 and resp.text.strip():
-                import json
-                data = json.loads(resp.text)
-                if data and len(data) > 20:
-                    records = []
-                    for item in data:
-                        records.append({
-                            '日期': item.get('day', '')[:10],
-                            '开盘': float(item.get('open', 0)),
-                            '收盘': float(item.get('close', 0)),
-                            '最高': float(item.get('high', 0)),
-                            '最低': float(item.get('low', 0)),
-                            '成交量': int(float(item.get('volume', 0))),
-                        })
-                    return pd.DataFrame(records)
-        except:
-            pass
-
-        # 2. yfinance
-        try:
-            import yfinance as yf
-            yahoo_code = code
-            if market == "SH":
-                yahoo_code = f"{code}.SS"
-            elif market == "SZ":
-                yahoo_code = f"{code}.SZ"
-            elif market == "HK":
-                yahoo_code = f"{code}.HK"
-            start = (datetime.now()-timedelta(days=days)).strftime("%Y-%m-%d")
-            end = (datetime.now()+timedelta(days=1)).strftime("%Y-%m-%d")
-            ticker = yf.Ticker(yahoo_code)
-            hist = ticker.history(start=start, end=end)
-            if hist is not None and not hist.empty:
-                df = pd.DataFrame({
-                    'date': hist.index.strftime('%Y-%m-%d'),
-                    'open': hist['Open'].round(2).values,
-                    'close': hist['Close'].round(2).values,
-                    'high': hist['High'].round(2).values,
-                    'low': hist['Low'].round(2).values,
-                    'volume': hist['Volume'].astype(int).values,
-                })
-                df.columns = ['日期', '开盘', '收盘', '最高', '最低', '成交量']
-                return df
-        except:
-            pass
-
-        return pd.DataFrame()
+        """获取历史K线数据 —— v1.3: 走 stock_repo（SQLite 优先），miss 走 akshare 兜底"""
+        from src.repository.stock_repo import stock_repo
+        code_norm, _, _ = self.normalize_stock_code(code)
+        df = stock_repo.get_history(code_norm, days)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # 兼容旧调用方：统一返回中文列名
+        rename_map = {
+            'date': '日期', 'open': '开盘', 'high': '最高',
+            'low': '最低', 'close': '收盘', 'volume': '成交量',
+        }
+        df = df.rename(columns=rename_map)
+        # 确保列顺序
+        for col in ['日期', '开盘', '收盘', '最高', '最低', '成交量']:
+            if col not in df.columns:
+                df[col] = 0
+        return df[['日期', '开盘', '收盘', '最高', '最低', '成交量']]
 
     def get_minute_data(self, code: str, market: str = "SH", period: str = "5") -> pd.DataFrame:
-        scale_map = {"1": 1, "5": 5, "15": 15, "30": 30, "60": 60}
-        scale = scale_map.get(period, 5)
-        prefix = {'SH': 'sh', 'SZ': 'sz'}.get(market, 'sh')
-
-        try:
-            import requests
-            url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                   f"CN_MarketData.getKLineData?symbol={prefix}{code}&scale={scale}&ma=5&datalen=200")
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200 and resp.text.strip():
-                import json
-                data = json.loads(resp.text)
-                if data and len(data) >= 20:
-                    records = [{
-                        '日期': item.get('day', '')[:16],
-                        '开盘': float(item.get('open', 0)),
-                        '收盘': float(item.get('close', 0)),
-                        '最高': float(item.get('high', 0)),
-                        '最低': float(item.get('low', 0)),
-                        '成交量': int(float(item.get('volume', 0))),
-                    } for item in data]
-                    return pd.DataFrame(records)
-        except Exception as e:
-            print(f"[Analyzer] get_minute_data failed {market}:{code} period={period} - {e}")
-        return pd.DataFrame()
+        # v1.3: 走 stock_repo（data/sina_kline 下沉）
+        from src.repository.stock_repo import stock_repo
+        df = stock_repo.get_minute_kline(code, market, period)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # 兼容旧调用方：返回中文列名
+        rename_map = {
+            'date': '日期', 'open': '开盘', 'high': '最高',
+            'low': '最低', 'close': '收盘', 'volume': '成交量',
+        }
+        df = df.rename(columns=rename_map)
+        for col in ['日期', '开盘', '收盘', '最高', '最低', '成交量']:
+            if col not in df.columns:
+                df[col] = 0
+        return df[['日期', '开盘', '收盘', '最高', '最低', '成交量']]
 
     def get_price_info(self, price_data) -> dict:
         """从历史数据提取价格信息"""
@@ -185,21 +126,12 @@ class StockAnalyzer:
             'turnover': int(last.get('\u6210\u4ea4\u989d', 0)),
         }
 
-    def _default_technical(self) -> dict:
-        """\u7f3a\u7701\u503c\u6280\u672f\u6307\u6807"""
-        return {
-            "ma_trend": "\u6570\u636e\u4e0d\u8db3", "rsi": 50.0,
-            "macd_signal": "\u6570\u636e\u4e0d\u8db3", "volume_status": "\u6570\u636e\u4e0d\u8db3",
-            "kdj": {"k": 50.0, "d": 50.0, "j": 50.0}, "bollinger_position": 0.5,
-            "vr": 100.0, "cci": 0.0, "trix": 0.0, "atr": 0.0
-        }
-
     def analyze_stock(self, code: str, market: str = "SH") -> dict[str, Any]:
         timestamp = datetime.now().isoformat()
 
         price_data = self.get_stock_data(code, market)
         price_info = self.get_price_info(price_data)
-        quote = self.registry.get_quote(code, market)
+        quote = stock_repo.get_quote(code, market)
         stock_name = self.get_stock_name(code)
 
         technical = self.calculate_technical_indicators(code, market)
@@ -284,7 +216,7 @@ class StockAnalyzer:
         lc = closes[-1]; m5 = ma5[-1]; m10 = ma10[-1]; m20 = ma20[-1]
         if lc > m5 > m10 > m20:
             ma_trend = "多头排列"
-        elif lc < m5 < m10 > m20:
+        elif lc < m5 < m10 < m20:
             ma_trend = "空头排列"
         else:
             ma_trend = "震荡整理"
@@ -313,6 +245,15 @@ class StockAnalyzer:
         atr = self._calc_atr(highs, lows, closes)
         obv = self._calc_obv(closes, volumes)
 
+        # MyTT 扩展指标（取最近 180 天，快速 numpy 实现）
+        _mytt_values = {}
+        try:
+            _n = min(len(closes), 180)
+            _c = closes[-_n:]; _h = highs[-_n:]; _l = lows[-_n:]
+            _mytt_values = _compute_mytt_fast(_c, _h, _l)
+        except Exception as e:
+            import logging as _lg; _lg.getLogger(__name__).warning(f"MyTT 扩展指标计算失败: {e}")
+
         result = {
             "price": round(float(closes[-1]), 2),
             "change_pct": round(float((closes[-1] - closes[-2]) / closes[-2] * 100), 2) if len(closes) > 1 else 0,
@@ -330,6 +271,7 @@ class StockAnalyzer:
             "obv_signal": self._calc_obv_signal(closes, volumes),
             "price_data_dates": len(price_data),
         }
+        result.update(_mytt_values)
 
         min_data = self.get_minute_data(code, market, "5")
         if not min_data.empty and len(min_data) >= 20:
@@ -357,96 +299,13 @@ class StockAnalyzer:
         return result
 
     def calculate_fundamental_indicators(self, code: str, market: str = "SH") -> dict[str, Any]:
-        """获取25项真实财务指标，失败时返回占位值"""
-        if market not in ("SH", "SZ"):
-            return self._default_fundamental()
-        
-        indicators = {}
-        valuation = {}
-        forecasts = []
-        dividends = []
-        industry = {}
-        
-        # 获取财务数据（使用快速版akshare接口）
-        try:
-            import akshare as ak, warnings
-            warnings.filterwarnings('ignore')
-            fin_df = ak.stock_financial_abstract(symbol=code)
-            if fin_df is not None and not fin_df.empty and '指标' in fin_df.columns:
-                data_col = fin_df.columns[2]
-                row_index = {r: r for r in fin_df['指标'].unique()}
-                row_map = {
-                    '归母净利润': '归母净利润', '营业总收入': '营业总收入', '净利润': '净利润',
-                    '基本每股收益': '基本每股收益', '每股净资产': '每股净资产',
-                    '每股经营现金流': '每股经营现金流',
-                    '净资产收益率(ROE)': '净资产收益率(ROE)',
-                    '总资产报酬率(ROA)': '总资产报酬率(ROA)',
-                    '毛利率': '毛利率', '销售净利率': '销售净利率',
-                    '资产负债率': '资产负债率',
-                    '净利润同比增长率': '归属母公司净利润增长率',
-                    '营收同比增长率': '营业总收入增长率',
-                }
-                for cn_name, row_name in row_map.items():
-                    match = fin_df[fin_df['指标'] == row_name]
-                    if not match.empty and data_col in match.columns:
-                        val = match[data_col].iloc[0]
-                        if val is not None:
-                            import math
-                            if isinstance(val, (int, float)) and not math.isnan(val):
-                                indicators[cn_name] = round(float(val), 2)
-                # 腾讯PE/PB
-                try:
-                    import requests as _req
-                    prefix = 'sh' if market == 'SH' else 'sz'
-                    resp = _req.get(f"http://qt.gtimg.cn/q={prefix}{code}", timeout=3)
-                    fields = resp.text.split('~')
-                    if len(fields) > 39 and fields[39]:
-                        indicators['市盈率'] = round(float(fields[39]), 2)
-                    if len(fields) > 46 and fields[46]:
-                        indicators['市净率'] = round(float(fields[46]), 2)
-                except:
-                    pass
-        except:
-            pass
-
-        if not indicators:
-            indicators = {
-                "净利润率": 10.0, "净资产收益率": 12.0, "总资产收益率": 8.0,
-                "毛利率": 25.0, "营业利润率": 12.0,
-                "流动比率": 2.0, "速动比率": 1.5, "资产负债率": 45.0, "产权比率": 0.8, "利息保障倍数": 5.0,
-                "总资产周转率": 0.8, "存货周转率": 4.5, "应收账款周转率": 5.0,
-                "流动资产周转率": 1.5, "固定资产周转率": 2.0,
-                "营收同比增长率": 15.0, "净利润同比增长率": 12.0,
-                "总资产增长率": 8.0, "净资产增长率": 10.0, "经营现金流增长率": 10.0,
-                "市盈率": 20.0, "市净率": 2.5, "市销率": 3.0, "PEG比率": 1.2, "股息收益率": 2.0
-            }
-        else:
-            pe = indicators.get('市盈率', 0)
-            profit_growth = indicators.get('净利润同比增长率', 0)
-            if isinstance(pe, (int, float)) and isinstance(profit_growth, (int, float)) and pe > 0 and profit_growth > 0:
-                indicators['PEG比率'] = round(pe / profit_growth, 2)
-            rev_growth = indicators.get('营收同比增长率', 0)
-            if isinstance(pe, (int, float)) and isinstance(rev_growth, (int, float)) and pe > 0 and rev_growth > 0:
-                peg_from_rev = pe / rev_growth
-                if 'PEG比率' not in indicators:
-                    indicators['PEG比率'] = round(peg_from_rev, 2)
-
-        return {
-            "basic_info": {"股票代码": code, "市场": market, "股票名称": code},
-            "financial_indicators": indicators,
-            "valuation": valuation,
-            "performance_forecast": forecasts,
-            "dividend_info": dividends,
-            "industry_analysis": industry
-        }
+        # v1.3: 拆分到 core/fundamental.py
+        from src.core import fundamental
+        return fundamental.calculate(code, market)
 
     def _default_fundamental(self) -> dict:
-        """默认基本面数据"""
-        return {
-            "basic_info": {}, "financial_indicators": {},
-            "valuation": {}, "performance_forecast": [],
-            "dividend_info": [], "industry_analysis": {}
-        }
+        from src.core import fundamental
+        return fundamental.default_result()
 
     def generate_signals(self, code: str, market: str = "SH", tech: dict = None) -> list[dict[str, str]]:
         tech = tech if tech is not None else self.calculate_technical_indicators(code, market)
@@ -484,293 +343,95 @@ class StockAnalyzer:
         return signals
 
     def _default_technical(self) -> dict[str, Any]:
-        return {
-            "ma_trend": "数据不足",
-            "rsi": 50.0,
-            "macd_signal": "数据不足",
-            "volume_status": "数据不足",
-            "kdj": {"k": 50.0, "d": 50.0, "j": 50.0},
-            "bollinger_position": 0.5,
-            "vr": 100.0,
-            "cci": 0.0,
-            "trix": 0.0,
-            "atr": 0.0,
-            "obv": 0.0,
-            "obv_signal": "数据不足",
-        }
+        return ind.default_technical()
 
     @staticmethod
     def _sma(data, window):
-        arr = np.array(data, dtype=float)
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.mean(arr[i - window + 1:i + 1])
-        return result
+        return ind.sma(data, window)
 
     @staticmethod
     def _ema(data, window):
-        arr = np.array(data, dtype=float)
-        result = np.full_like(arr, np.nan)
-        multiplier = 2 / (window + 1)
-        result[0] = arr[0]
-        for i in range(1, len(arr)):
-            result[i] = (arr[i] - result[i - 1]) * multiplier + result[i - 1]
-        return result
+        return ind.ema(data, window)
 
     @staticmethod
     def _calc_rsi(closes, period=14):
-        arr = np.array(closes, dtype=float)
-        deltas = np.diff(arr)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-        rsi = np.full_like(arr, 50.0)
-        avg_gain = np.mean(gains[:period]) if len(gains) >= period else 0
-        avg_loss = np.mean(losses[:period]) if len(losses) >= period else 0.001
-        rs = avg_gain / avg_loss if avg_loss else 1
-        rsi[period] = 100 - (100 / (1 + rs))
-        for i in range(period + 1, len(arr)):
-            avg_gain = ((avg_gain * (period - 1)) + gains[i - 1]) / period
-            avg_loss = ((avg_loss * (period - 1)) + losses[i - 1]) / period
-            rs = avg_gain / avg_loss if avg_loss else 1
-            rsi[i] = 100 - (100 / (1 + rs))
-        return rsi
+        return ind.calc_rsi(closes, period)
 
     @staticmethod
     def _calc_macd(closes, fast=12, slow=26, signal=9):
-        arr = np.array(closes, dtype=float)
-        ema_fast = StockAnalyzer._ema(arr, fast)
-        ema_slow = StockAnalyzer._ema(arr, slow)
-        macd_line = ema_fast - ema_slow
-        signal_line = StockAnalyzer._ema(macd_line, signal)
-        histogram = macd_line - signal_line
-        return macd_line, signal_line, histogram
+        return ind.calc_macd(closes, fast, slow, signal)
 
     @staticmethod
     def _calc_kdj(highs, lows, closes, period=9):
-        h = np.array(highs, dtype=float)
-        l = np.array(lows, dtype=float)
-        c = np.array(closes, dtype=float)
-        hn = np.full_like(c, np.nan)
-        ln = np.full_like(c, np.nan)
-        for i in range(len(c)):
-            start = max(0, i - period + 1)
-            hn[i] = np.max(h[start:i + 1])
-            ln[i] = np.min(l[start:i + 1])
-        rsv = np.where((hn - ln) != 0, (c - ln) / (hn - ln) * 100, 50)
-        k = np.full_like(c, 50.0)
-        d = np.full_like(c, 50.0)
-        for i in range(1, len(c)):
-            k[i] = 2 / 3 * k[i - 1] + 1 / 3 * rsv[i]
-            d[i] = 2 / 3 * d[i - 1] + 1 / 3 * k[i]
-        j = 3 * k - 2 * d
-        return float(k[-1]), float(d[-1]), float(j[-1])
+        return ind.calc_kdj(highs, lows, closes, period)
 
     @staticmethod
     def _calc_bollinger_position(closes, ma20, std_mult=2):
-        c = np.array(closes, dtype=float)
-        m20 = np.array(ma20, dtype=float)
-        std = np.full_like(c, np.nan)
-        for i in range(len(c)):
-            if i >= 19:
-                std[i] = np.std(c[i - 19:i + 1])
-        if np.isnan(std[-1]) or m20[-1] == 0:
-            return 0.5
-        upper = m20[-1] + std_mult * std[-1]
-        lower = m20[-1] - std_mult * std[-1]
-        if upper == lower:
-            return 0.5
-        return (c[-1] - lower) / (upper - lower)
+        return ind.calc_bollinger_position(closes, ma20, std_mult)
 
     @staticmethod
     def _calc_vr(closes, volumes, period=26):
-        if len(closes) < period:
-            return 100.0
-        c = np.array(closes[-period:], dtype=float)
-        v = np.array(volumes[-period:], dtype=float)
-        if len(c) < 2:
-            return 100.0
-        deltas = np.diff(c)
-        up_vol = np.sum(v[1:][deltas >= 0])
-        down_vol = np.sum(v[1:][deltas < 0])
-        if down_vol == 0:
-            return 200.0
-        return up_vol / down_vol * 100
+        return ind.calc_vr(closes, volumes, period)
 
     @staticmethod
     def _calc_cci(highs, lows, closes, period=20):
-        if len(closes) < period:
-            return 0.0
-        h = np.array(highs[-period:], dtype=float)
-        l = np.array(lows[-period:], dtype=float)
-        c = np.array(closes[-period:], dtype=float)
-        tp = (h + l + c) / 3
-        ma_tp = np.mean(tp)
-        md = np.mean(np.abs(tp - ma_tp))
-        if md == 0:
-            return 0.0
-        return (tp[-1] - ma_tp) / (0.015 * md)
+        return ind.calc_cci(highs, lows, closes, period)
 
     @staticmethod
     def _calc_obv(closes, volumes):
-        c = np.array(closes, dtype=float)
-        v = np.array(volumes, dtype=float)
-        if len(c) < 2:
-            return 0.0
-        obv = np.zeros(len(c))
-        obv[0] = v[0]
-        deltas = np.diff(c)
-        for i in range(1, len(c)):
-            if deltas[i - 1] > 0:
-                obv[i] = obv[i - 1] + v[i]
-            elif deltas[i - 1] < 0:
-                obv[i] = obv[i - 1] - v[i]
-            else:
-                obv[i] = obv[i - 1]
-        return float(obv[-1])
+        return ind.calc_obv(closes, volumes)
 
     @staticmethod
     def _calc_obv_signal(closes, volumes, period=20):
-        c = np.array(closes, dtype=float)
-        v = np.array(volumes, dtype=float)
-        if len(c) < period + 1:
-            return "数据不足"
-        obv_vals = np.zeros(len(c))
-        obv_vals[0] = v[0]
-        deltas = np.diff(c)
-        for i in range(1, len(c)):
-            if deltas[i - 1] > 0:
-                obv_vals[i] = obv_vals[i - 1] + v[i]
-            elif deltas[i - 1] < 0:
-                obv_vals[i] = obv_vals[i - 1] - v[i]
-            else:
-                obv_vals[i] = obv_vals[i - 1]
-        ma_obv = np.convolve(obv_vals, np.ones(period) / period, mode='valid')
-        if len(ma_obv) < 2:
-            return "数据不足"
-        cur_obv = obv_vals[-1]
-        cur_ma = ma_obv[-1]
-        prev_ma = ma_obv[-2] if len(ma_obv) > 1 else cur_ma
-        price_cur = c[-1]
-        price_prev = c[-period] if len(c) > period else c[0]
-        if cur_obv > cur_ma and price_cur <= price_prev:
-            return "顶背离"
-        elif cur_obv < cur_ma and price_cur >= price_prev:
-            return "底背离"
-        elif cur_obv > cur_ma:
-            return "量价配合"
-        else:
-            return "中性"
+        return ind.calc_obv_signal(closes, volumes, period)
 
     @staticmethod
     def _calc_atr(highs, lows, closes, period=14):
-        if len(closes) < period + 1:
-            return 0.0
-        h = np.array(highs[-(period + 1):], dtype=float)
-        l = np.array(lows[-(period + 1):], dtype=float)
-        c = np.array(closes[-(period + 1):], dtype=float)
-        tr = np.maximum(h[1:] - l[1:],
-                        np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-        return float(np.mean(tr))
+        return ind.calc_atr(highs, lows, closes, period)
 
     @staticmethod
     def _calc_adx(highs, lows, closes, period=14):
-        h = np.array(highs, dtype=float)
-        l = np.array(lows, dtype=float)
-        c = np.array(closes, dtype=float)
-        if len(c) < period + 1:
-            return 0.0
-        up_move = h[1:] - h[:-1]
-        down_move = l[:-1] - l[1:]
-        plus_dm = np.where(up_move > down_move, up_move, 0.0)
-        minus_dm = np.where(down_move > up_move, down_move, 0.0)
-        tr_list = np.maximum(h[1:] - l[1:], np.abs(c[1:] - c[:-1]))
-        if len(tr_list) < period:
-            return 0.0
-        atr_smooth = float(np.mean(tr_list[:period]))
-        plus_dm_smooth = float(np.mean(plus_dm[:period]))
-        minus_dm_smooth = float(np.mean(minus_dm[:period]))
-        for i in range(period, len(tr_list)):
-            atr_smooth = (atr_smooth * (period - 1) + tr_list[i]) / period
-            plus_dm_smooth = (plus_dm_smooth * (period - 1) + plus_dm[i]) / period
-            minus_dm_smooth = (minus_dm_smooth * (period - 1) + minus_dm[i]) / period
-        plus_di = (plus_dm_smooth / atr_smooth * 100) if atr_smooth > 0 else 0
-        minus_di = (minus_dm_smooth / atr_smooth * 100) if atr_smooth > 0 else 0
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di) * 100) if (plus_di + minus_di) > 0 else 0
-        adx_vals = [dx] * period
-        return float(np.mean(adx_vals))
+        return ind.calc_adx(highs, lows, closes, period)
 
     @staticmethod
     def _calc_cmf(closes, highs, lows, volumes, period=20):
-        c = np.array(closes, dtype=float)
-        h = np.array(highs, dtype=float)
-        l = np.array(lows, dtype=float)
-        v = np.array(volumes, dtype=float)
-        if len(c) < period + 1:
-            return 0.0
-        hl_diff = h - l
-        mf_multiplier = np.where(hl_diff != 0, ((c - l) - (h - c)) / hl_diff, 0.0)
-        mf_volume = mf_multiplier * v
-        cmf = np.sum(mf_volume[-period:]) / np.sum(v[-period:]) if np.sum(v[-period:]) > 0 else 0.0
-        return float(cmf)
+        return ind.calc_cmf(closes, highs, lows, volumes, period)
 
     @staticmethod
     def _calc_williams_r(highs, lows, closes, period=14):
-        h = np.array(highs, dtype=float)
-        l = np.array(lows, dtype=float)
-        c = np.array(closes, dtype=float)
-        if len(c) < period:
-            return -50.0
-        period_high = np.max(h[-(period):])
-        period_low = np.min(l[-(period):])
-        if period_high == period_low:
-            return -50.0
-        wr = (period_high - c[-1]) / (period_high - period_low) * -100
-        return float(wr)
+        return ind.calc_williams_r(highs, lows, closes, period)
 
     def _judge_ma_trend(self, price: float, ma5: float, ma10: float, ma20: float) -> str:
-        if price > ma5 > ma10 > ma20:
-            return "多头排列"
-        elif price < ma5 < ma10 < ma20:
-            return "空头排列"
-        return "震荡整理"
+        return ind.judge_ma_trend(price, ma5, ma10, ma20)
 
     def _judge_volume(self, volume: int, avg_volume: int) -> str:
-        if volume > avg_volume * 1.5:
-            return "放量"
-        elif volume < avg_volume * 0.5:
-            return "缩量"
-        return "量能平稳"
+        return ind.judge_volume(volume, avg_volume)
 
     @staticmethod
     def _calc_ma_biass(closes, period=5):
-        c = np.array(closes, dtype=float)
-        if len(c) < period:
-            return 0.0
-        ma = np.mean(c[-period:])
-        if ma == 0:
-            return 0.0
-        return float((c[-1] - ma) / ma * 100)
+        return ind.calc_ma_biass(closes, period)
 
     @staticmethod
     def _calc_histogram_slope(histogram, n=5):
-        h = np.array(histogram, dtype=float)
-        if len(h) < n + 1:
-            return 0.0
-        recent = h[-n:]
-        earlier = h[-n*2:-n]
-        if len(earlier) == 0:
-            return 0.0
-        slope = (np.mean(recent) - np.mean(earlier)) / (np.abs(np.mean(earlier)) + 1e-9)
-        return float(slope)
+        return ind.calc_histogram_slope(histogram, n)
 
     def _calculate_sentiment(self, code: str, market: str) -> dict[str, Any]:
         """计算市场情绪（基于财联社新闻）"""
         try:
-            from src.data.news import NewsAggregator
+            news_agg = stock_repo.get_news_aggregator()
 
-            news_agg = NewsAggregator()
-            news_list = news_agg.get_hot_news(max_items=50)
+            # 获取股票名称和板块信息
+            stock_name = self.get_stock_name(code)
+            sector = ""
+
+            # 获取个股相关新闻（匹配代码、名称、板块）
+            stock_news = news_agg.get_stock_news(code, stock_name, sector, max_items=30)
+
+            # 获取市场整体情绪（大盘热点新闻）
+            market_news = news_agg.get_market_news(max_items=30)
+
+            # 合并：个股新闻权重更高
+            news_list = stock_news + market_news
 
             if not news_list:
                 return {
@@ -882,9 +543,11 @@ class StockAnalyzer:
             score -= 15
 
         vol_status = technical.get("volume_status", "量能平稳")
-        if "放量上涨" in vol_status:
+        vol_ratio = technical.get("volume_ratio", 1)
+        change_pct = technical.get("change_pct", 0)
+        if "放量" in vol_status and change_pct > 0:
             score += 10
-        elif "放量下跌" in vol_status:
+        elif "放量" in vol_status and change_pct < 0:
             score -= 10
 
         return max(0.0, min(100.0, score))
@@ -893,6 +556,9 @@ class StockAnalyzer:
         score = 50.0
 
         indicators = fundamental.get("financial_indicators", {})
+        if fundamental.get("data_unavailable"):
+            return score
+
         if len(indicators) >= 15:
             score += 20
 
@@ -1258,34 +924,15 @@ class StockAnalyzer:
             except Exception as e:
                 result['warnings'].append(f"L0计算异常: {str(e)[:50]}")
 
-        # L2: 周K数据（A股中期，从新浪日K resample 避免 AkShare/East Money 依赖）
+        # L2: 周K数据（A股中期）—— v1.3: 走 stock_repo.get_weekly_kline
+        weekly_df = pd.DataFrame()
         if market in ("SH", "SZ"):
             try:
-                prefix = 'sh' if market == 'SH' else 'sz'
-                import requests
-                url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                       f"CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=5&datalen=400")
-                resp = requests.get(url, timeout=10)
-                weekly_df = pd.DataFrame()
-                if resp.status_code == 200 and resp.text.strip():
-                    import json
-                    daily_data = json.loads(resp.text)
-                    if daily_data and len(daily_data) >= 50:
-                        df = pd.DataFrame([{
-                            '日期': item.get('day', '')[:10],
-                            '开盘': float(item.get('open', 0)),
-                            '收盘': float(item.get('close', 0)),
-                            '最高': float(item.get('high', 0)),
-                            '最低': float(item.get('low', 0)),
-                            '成交量': int(float(item.get('volume', 0))),
-                        } for item in daily_data])
-                        df['日期'] = pd.to_datetime(df['日期'])
-                        weekly_df = df.set_index('日期').resample('W').agg({
-                            '开盘': 'first', '收盘': 'last',
-                            '最高': 'max', '最低': 'min',
-                            '成交量': 'sum'
-                        }).dropna()
-                if not weekly_df.empty and len(weekly_df) >= 10:
+                from src.repository.stock_repo import stock_repo
+                weekly_df = stock_repo.get_weekly_kline(code, weeks=60) or pd.DataFrame()
+            except Exception as e:
+                result.setdefault('warnings', []).append(f"L2周K异常: {str(e)[:50]}")
+            if not weekly_df.empty and len(weekly_df) >= 10:
                     wc = weekly_df['收盘'].values.astype(float)
                     wh = weekly_df['最高'].values.astype(float)
                     wl = weekly_df['最低'].values.astype(float)
@@ -1345,10 +992,8 @@ class StockAnalyzer:
                         },
                         'available': True
                     }
-                else:
-                    result['warnings'].append("L2数据不足（周K不足10根）")
-            except Exception as e:
-                result['warnings'].append(f"L2计算异常: {str(e)[:50]}")
+            else:
+                result['warnings'].append("L2数据不足（周K不足10根）")
 
         # L3: 财报数据（长期）
         if market in ("SH", "SZ"):
@@ -1570,22 +1215,142 @@ class StockAnalyzer:
 
     def generate_ai_analysis(self, report: dict, stream_callback=None, position_data: dict = None) -> str:
         try:
-            text = self._build_ai_prompt(report, position_data)
-            return self._call_llm(text, stream_callback=stream_callback)
+            logger.info("[AI] 开始构建分析提示...")
+            # 先推送初始消息，减少空白等待
+            if stream_callback:
+                stream_callback("⏳ AI 分析生成中，请稍候...\n\n")
+
+            # v1.5: _build_ai_prompt 可能因数据源（东财/腾讯/新浪）卡住，
+            # 用子线程 + 45s 超时保护。先通知用户正在获取额外数据。
+            if stream_callback:
+                stream_callback("📡 正在获取板块、资金流、新闻等辅助数据...\n\n")
+
+            with ThreadPoolExecutor(max_workers=1) as _prompt_pool:
+                _fut = _prompt_pool.submit(self._build_ai_prompt, report, position_data)
+                try:
+                    text = _fut.result(timeout=45)
+                except FutureTimeoutError:
+                    _fut.cancel()
+                    raise TimeoutError("获取辅助数据超时（45s），请检查网络或数据源（东方财富/腾讯/新浪）状态")
+
+            logger.info(f"[AI] 提示词构建完成，长度: {len(text)} 字符")
+
+            if stream_callback:
+                stream_callback("✅ 辅助数据获取完成，正在请求 AI 模型...\n\n")
+
+            # 使用真流式：边接收边推送，让用户实时看到生成进度。
+            result = self._call_llm(text, stream_callback=stream_callback)
+
+            # 流式结束后做一次离线校验（不影响已推送的内容）
+            issues = self._validate_ai_report(result)
+            if issues:
+                logger.warning(f"[AI] 首次输出未达标（离线记录）: {issues}")
+            logger.info(f"[AI] 分析完成，输出长度: {len(result)} 字符")
+            return result
         except Exception as e:
-            print(f"[AI] generate_ai_analysis error: {e}")
-            return "(AI分析异常)"
+            err = str(e)
+            logger.error(f"[AI] generate_ai_analysis error: {err[:200]}", exc_info=True)
+            return f"## AI 分析失败\n\n错误：{err[:200]}\n\n请检查 config.json 中 model_preference / api_key / api_base_url 是否正确。"
+
+    def _validate_ai_report(self, text: str) -> list:
+        """检查 AI 报告关键要素是否完备（精简版）。"""
+        issues = []
+        if not text or len(text.strip()) < 800:
+            issues.append('输出过短')
+        if '## 结论卡片' not in text:
+            issues.append('缺少结论卡片')
+        if text.count('|---') < 1:
+            issues.append('缺少 Markdown 表格')
+        action_words = ['买入', '持有', '减仓', '止损', '观察']
+        if not any(w in text for w in action_words):
+            issues.append(f'缺少操作动作（需含：{"、".join(action_words)}之一）')
+        return issues[:5]
+
+    def _build_ai_repair_prompt(self, original_prompt: str, bad_output: str, issues: list) -> str:
+        return f"""下面是同一个股票分析任务。上一次输出不合格，必须完全重写。
+
+【不合格原因】
+{chr(10).join(f'- {x}' for x in issues)}
+
+【上一次不合格输出，仅用于避免重复错误】
+{bad_output[:2000]}
+
+【强制要求】
+1. 必须包含 `## 结论卡片` 表格（操作评级、核心理由、风险等级、时间因素、板块联动）。
+2. 必须包含 `## 核心判断与风险机会`（2-3 个核心判断 + 风险/机会各 2-3 条）。
+3. 必须包含 `## 操作计划`，含具体触发价位（根据实际持仓状态输出对应情景）。
+4. 必须使用至少 1 个 Markdown 表格。
+5. 必须包含“买入/持有/减仓/止损/观察”之一。
+6. 如果数据不足，写“数据缺失”而不是编造。
+7. 不少于 800 字。
+8. 直接输出报告正文。
+
+【原始任务和真实数据】
+{original_prompt}"""
+
+    def _replay_ai_stream(self, text: str, stream_callback) -> None:
+        """把校验后的完整报告分块推送，保留前端流式体验。"""
+        chunk_size = 96
+        for i in range(0, len(text), chunk_size):
+            stream_callback(text[i:i + chunk_size])
 
     def _build_ai_prompt(self, r: dict, position_data: dict = None) -> str:
         scores = r.get('scores', {})
         tech = r.get('technical', {})
         fund = r.get('fundamental', {})
         sent = r.get('sentiment', {})
+        chanlun = r.get('chanlun', {})
         signals = r.get('signals', [])
         price_info = r.get('price_info', {})
         quote = r.get('quote', {})
         name = r.get('name', r.get('code', ''))
         code = r.get('code', '')
+
+        # 注入四步定量信号（L0-L3）
+        l0123_text = ''
+        try:
+            market = r.get('market', 'SH' if str(code).startswith(('6', '9')) else 'SZ')
+            l0123 = self.calculate_signals_l0123(code, market)
+            l_lines = []
+            for level in ['L0', 'L1', 'L2', 'L3']:
+                ld = l0123.get(level, {})
+                if ld.get('available'):
+                    l_lines.append(f"- {level}: {ld.get('score', 0):+.2f}")
+            if l_lines:
+                l0123_text = '\n'.join(l_lines)
+        except Exception:
+            l0123_text = ''
+
+        # 缠论数据
+        chanlun_text = ''
+        if chanlun and chanlun.get('available'):
+            score = chanlun.get('chanlun_score', 0.0)
+            trend = chanlun.get('current_trend', 'N/A')
+            strength = chanlun.get('trend_strength', '')
+            ma_arr = chanlun.get('ma_arrangement', '')
+            fenxing = chanlun.get('fenxing', '')
+            beichi = chanlun.get('beichi_list', [])
+            sr = chanlun.get('support_resistance', {})
+            bs = chanlun.get('buy_sell_points', {})
+            op_advice = bs.get('operation_advice', '')
+            buy_pts = bs.get('buy_points', [])
+            sell_pts = bs.get('sell_points', [])
+
+            lines = [
+                f"- 综合评分：{score:+.2f}（{trend}{' ' + strength if strength else ''}）",
+                f"- 均线排列：{ma_arr}" if ma_arr else None,
+                f"- 当前分型：{fenxing}" if fenxing else None,
+                f"- 背驰次数：{len(beichi)}" if beichi else None,
+                f"- 重要支撑：MA5={sr.get('ma5','—')} / MA10={sr.get('ma10','—')} / MA20={sr.get('ma20','—')} / 近低={sr.get('recent_low','—')} / 近高={sr.get('recent_high','—')}" if sr else None,
+                f"- 买入信号：{', '.join(buy_pts[:3]) if buy_pts else '暂无'}",
+                f"- 卖出信号：{', '.join(sell_pts[:3]) if sell_pts else '暂无'}",
+                f"- 操作建议：{op_advice}" if op_advice else None,
+            ]
+            chanlun_text = '\n'.join(filter(None, lines))
+        elif chanlun:
+            chanlun_text = f"- 状态：{chanlun.get('summary', '数据不足')}"
+        else:
+            chanlun_text = '- 缠论数据暂不可用'
 
         position_context = ""
         if position_data:
@@ -1610,78 +1375,225 @@ class StockAnalyzer:
         sig_text = '; '.join([f"{s.get('type','')}:{s.get('signal','')}" for s in signals[:5]])
 
         indicators = fund.get('financial_indicators', {}) if fund else {}
-        fin_list = []
-        for k, v in list(indicators.items())[:15]:
-            fin_list.append(f"{k}: {v}")
-        fin_text = '\n'.join(fin_list) if fin_list else "数据暂缺"
+        if fund and fund.get('data_unavailable'):
+            fin_text = '财务数据暂不可用（当前数据源未能获取到该股票财务报表）'
+        else:
+            fin_list = []
+            for k, v in list(indicators.items())[:15]:
+                fin_list.append(f"{k}: {v}")
+            fin_text = '\n'.join(fin_list) if fin_list else "数据暂缺"
 
         current_price = quote.get('price') or price_info.get('current_price', 0) or tech.get('price', 0)
         change_pct = quote.get('change_pct') or price_info.get('change_percent', 0) or tech.get('change_pct', 0)
 
-        return f"""你是一位专业的A股股票分析师。请基于以下数据生成一份完整的股票分析报告，格式参考给出的示例。
+        # 额外真实上下文：行业、市场情绪、资金流、个股新闻、估值/市值、持仓信息。
+        # 失败时只写“未获取到”，不编造。
+        extra = {
+            'sector': '未获取到',
+            'market_mood': '未获取到',
+            'market_temp': '未获取到',
+            'northbound': '未获取到',
+            'main_flow_30m_yi': '未获取到',
+            'stock_news': [],
+            'sector_news': [],
+            'market_cap_yi': '未获取到',
+            'float_market_cap_yi': '未获取到',
+            'pe': '未获取到',
+            'pb': '未获取到',
+            'turnover_pct': '未获取到',
+            'political_sector_impact': [],
+        }
+        try:
+            extra['sector'] = stock_repo.fetch_stock_sector(code)
+            market = stock_repo.build_market_overview()
+            extra['market_mood'] = market.get('mood', '未获取到')
+            extra['market_temp'] = market.get('thermometer', '未获取到')
+            extra['political_sector_impact'] = market.get('political_sector_impact') or []
+            nb = market.get('northbound') or {}
+            extra['northbound'] = nb.get('total_yi', '未获取到')
+        except Exception:
+            logger.warning("[AI] 获取板块/市场情绪/北向数据失败", exc_info=True)
+        try:
+            flow = stock_repo.get_fund_flow_minute(code)[-30:]
+            if flow:
+                extra['main_flow_30m_yi'] = round(sum(f.get('main_net', 0) for f in flow) / 1e8, 3)
+        except Exception:
+            logger.warning("[AI] 获取资金流数据失败", exc_info=True)
+        try:
+            news = stock_repo.get_news_bundle(code, name=name, sector=extra.get('sector', ''))
+            extra['stock_news'] = [n.get('title', '')[:100] for n in (news.get('stock_news') or [])[:6] if n.get('title')]
+            extra['sector_news'] = [n.get('title', '')[:100] for n in (news.get('sector_news') or [])[:6] if n.get('title')]
+            extra['cls_news']    = [n.get('title', '')[:100] for n in (news.get('cls_news') or [])[:8] if n.get('title')]
+        except Exception:
+            logger.warning("[AI] 获取新闻数据失败", exc_info=True)
+        try:
+            from src.repository.stock_repo import stock_repo
+            market_code = 'SH' if str(code).startswith(('6', '9')) else 'SZ'
+            ext = stock_repo.get_quote_extended(code, market_code)
+            if ext and ext.get('turnover_pct') is not None:
+                extra['turnover_pct'] = ext['turnover_pct']
+            extra['pe'] = ext.get('pe', extra['pe'])
+            extra['float_market_cap_yi'] = ext.get('float_market_cap_yi', extra['float_market_cap_yi'])
+            extra['market_cap_yi'] = ext.get('market_cap_yi', extra['market_cap_yi'])
+            extra['pb'] = ext.get('pb', extra['pb'])
+        except Exception:
+            logger.warning("[AI] 获取扩展行情数据失败", exc_info=True)
 
-股票信息：
+        stock_news_text = '\n'.join([f"- {t}" for t in extra['stock_news']]) or '- 未获取到个股新闻'
+        sector_news_text = '\n'.join([f"- {t}" for t in extra['sector_news']]) or '- 未获取到板块/政策新闻'
+        cls_news_text = '\n'.join([f"- {t}" for t in extra.get('cls_news', [])]) or '- 未获取到财联社电报'
+        political_impact_text = '\n'.join([
+            f"- {x.get('sector')}: {x.get('impact')}（分数 {x.get('score')}, 置信 {x.get('confidence')}%）；关键词：{'/'.join(x.get('keywords', [])[:5])}；依据：" +
+            '；'.join([h.get('title','') for h in (x.get('headlines') or [])[:2]])
+            for x in (extra.get('political_sector_impact') or [])[:6]
+        ]) or '- 未获取到可归因的时政/政策板块影响'
+        rec = r.get('recommendation', '')
+        if isinstance(rec, dict):
+            rec_text = rec.get('action', '') or str(rec)
+        else:
+            rec_text = str(rec)
+        reason_text = r.get('reason', '') or (rec.get('reason', '') if isinstance(rec, dict) else '')
+
+        # 获取交易日历信息
+        try:
+            from src.util.trading_calendar import build_calendar_analysis
+            calendar_info = build_calendar_analysis(code, 'A股')
+            calendar_summary = calendar_info.get('summary', '')
+        except Exception:
+            calendar_summary = '交易日历信息暂不可用'
+
+        # v1.3: 不再调用 global_market（港美股已停支持），保留 A 股板块联动占位
+        global_summary = '国内板块联动信息见相关产业链标的'
+
+        # v1.4: 操作计划根据实际持仓状态二选一，不再同时输出两种情景
+        if position_context:
+            operation_plan_section = (
+                f"""**当前持仓情景** — 持有/减仓/止损的条件、具体价位、仓位调整（无需考虑买入成本）\n"""
+                f"""如果数据缺失，该处写"数据缺失，不能下结论"，不要编造。"""
+            )
+        else:
+            operation_plan_section = (
+                f"""**未持仓情景（考虑买入）** — 买入触发价、预期区间、止损价、仓位建议\n"""
+                f"""如果数据缺失，该处写"数据缺失，不能下结论"，不要编造。"""
+            )
+
+        return f"""你是一位专注 A 股交易决策的股票分析师。根据下方的真实数据，输出一份聚焦现在该做什么的分析报告。
+
+【核心原则】
+- 基于真实数据，数据不足时写”数据缺失，不能下结论”
+- 禁止泛泛而谈，每个判断必须引用具体数据
+- 不编造任何价格、订单、客户、专利信息
+- 直接输出报告正文，不要解释你将如何写
+
+【当前股票真实上下文】
 - 股票名称：{name}
 - 股票代码：{code}
+- 所属行业：{extra.get('sector')}
 - 当前价格：¥{current_price}
-- 涨跌幅：{change_pct}%
+- 今日涨跌幅：{change_pct}%
+- 换手率：{extra.get('turnover_pct')}%
+- PE：{extra.get('pe')}
+- PB：{extra.get('pb')}
+- 流通市值：{extra.get('float_market_cap_yi')} 亿
+- 总市值：{extra.get('market_cap_yi')} 亿
+{position_context}
+【交易日历与时间因素】
+{calendar_summary}
 
-{position_context}综合评分：{scores.get('comprehensive_score', 0)}/100
-技术评分：{scores.get('technical_score', 0)}/100
-基本面评分：{scores.get('fundamental_score', 0)}/100
-情绪评分：{scores.get('sentiment_score', 0)}/100
+【全球市场联动数据】
+{global_summary}
 
-技术指标：
+【市场/资金真实数据】
+- 当前大盘情绪：{extra.get('market_mood')}（温度计 {extra.get('market_temp')}）
+- 北向合计：{extra.get('northbound')} 亿
+- 近 30 分钟主力资金净流入：{extra.get('main_flow_30m_yi')} 亿
+
+【量化评分】
+- 综合评分：{scores.get('comprehensive_score', 0)}/100
+- 技术评分：{scores.get('technical_score', 0)}/100
+- 基本面评分：{scores.get('fundamental_score', 0)}/100
+- 情绪评分：{scores.get('sentiment_score', 0)}/100
+{l0123_text}
+
+【技术指标】
 - RSI：{tech.get('rsi', 'N/A')}
 - MA趋势：{tech.get('ma_trend', 'N/A')}
+- MA5：{tech.get('ma5', 'N/A')} | MA10：{tech.get('ma10', 'N/A')} | MA20：{tech.get('ma20', 'N/A')}
 - MACD：{tech.get('macd_signal', 'N/A')}
 - KDJ：K={tech.get('kdj',{}).get('k','N/A')} D={tech.get('kdj',{}).get('d','N/A')} J={tech.get('kdj',{}).get('j','N/A')}
 - 布林带位置：{tech.get('bollinger_position', 'N/A')}
+- 布林带参考价位：中轨≈MA20={tech.get('ma20', 'N/A')}，上轨=中轨+2×标准差，下轨=中轨-2×标准差
 - 成交量比：{tech.get('volume_ratio', 'N/A')}
 - 成交量状态：{tech.get('volume_status', 'N/A')}
+- 交易信号：{sig_text}
+- CCI：{tech.get('cci', 'N/A')}（顺势指标，>100超买|<-100超卖，数值极端提示反转风险）
+- ATR：{tech.get('atr', 'N/A')}（平均真实波幅，ATR越大波动越剧烈，止损应设越宽）
+- OBV：{tech.get('obv', 'N/A')}（累积成交量，OBV领先价格为先行信号）| 信号：{tech.get('obv_signal', 'N/A')}
+- ADX：{tech.get('adx', 'N/A')}（趋势强度指数，>25趋势强劲，<20震荡无趋势）
+- BIAS(6)：{tech.get('bias6', 'N/A')}（偏离均线的百分比，>8%超买信号，<-8%超卖信号）
 
-财务指标（部分）：
+【缠论结构】（独立于上述指标的多空结构分析）
+{chanlun_text}
+
+【财务/估值补充】
 {fin_text}
 
-市场情绪：
-- 情绪趋势：{sent.get('sentiment_trend', 'N/A')}
-- 新闻数量：{sent.get('total_analyzed', 0)}条
-- 正面/负面：{sent.get('positive_ratio', 0):.0%}/{sent.get('negative_ratio', 0):.0%}
-- 数据来源：{', '.join(sent.get('news_sources', ['未知']))}
-- 置信度：{(sent.get('confidence_score', 0) * 100):.0f}%
+【个股新闻标题】
+{stock_news_text}
 
-交易信号：
-{sig_text}
+【板块/政策/产业快讯标题】
+{sector_news_text}
 
-建议：{r.get('recommendation', '')}。理由：{r.get('reason', '')}
+【财联社电报（优先参考）】
+{cls_news_text}
 
-请生成以下格式的完整分析报告（不少于800字）：
+【时政/政策/新闻情绪对板块影响】
+{political_impact_text}
 
-### 一、财务健康度深度解读
-[内容]
+【系统初始建议】
+- 建议：{rec_text}
+- 理由：{reason_text}
 
-### 二、技术面精准分析
-[内容]
+【输出格式 — 必须是以下 3 个部分】
 
-### 三、市场情绪深度挖掘
-[内容]
+## 结论卡片
+| 项目 | 结论 |
+|---|---|
+| 当前操作 | 在“可买 / 持有 / 减仓 / 止损 / 观察”中选一个 |
+| 核心理由 | 用一句话概括，必须引用评分/价格/资金/消息之一 |
+| 风险等级 | 低 / 中 / 高 |
+| 时间因素 | 今天周几、明天是否开盘、是否临近周末/假期 |
+| 板块联动影响 | 所属板块的政策/情绪影响（利好/利空/中性） |
 
-### 四、基本面价值判断
-[内容]
+## 核心判断与风险机会
+3-5 条 bullet 直接回答：这只股的核心矛盾是什么、市场当前忽略了什么。
+然后分别列出：
+- **上行机会**（2-3 条，含触发条件）
+- **下行风险**（2-3 条，含具体价位/条件）
 
-### 五、综合投资策略
-[内容]
+## 操作计划
+{operation_plan_section}
 
-### 六、风险与机会识别
-[内容]
 
-### 结论总结
-[内容]"""
+【输出要求】
+- 不少于 800 字
+- 必须包含 `## 结论卡片` 表格
+- 必须使用 ✅/⚠️/❌ 标识利好、风险、否定
+- 每个判断必须回到 {name}({code}) 的真实数据
+- 禁止空话套话，禁止出现”作为AI””无法预测”等废话
+- 直接输出报告正文，不要加额外的说明文字"""
 
     def _call_llm(self, prompt: str, stream_callback=None) -> str:
-        """调用LLM API，支持任意OpenAI兼容提供商。通过配置文件切换模型。"""
+        """调用LLM API，支持任意OpenAI兼容提供商。通过配置文件切换模型。
+
+        v1.5 改进：
+        - 逐 chunk 超时保护（httpx read_timeout=90s），防止 LLM 中途卡死
+        - 总超时 300s 硬限
+        - 自动重试 1 次（仅对网络类异常），减少偶发失败
+        """
         import json, os, logging
         logger = logging.getLogger(__name__)
+        import httpx
 
         # 查找配置文件
         cfg = None
@@ -1725,79 +1637,155 @@ class StockAnalyzer:
         max_tokens = ai_cfg.get('max_tokens', 2000)
         temperature = ai_cfg.get('temperature', 0.7)
 
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key, base_url=base_url, timeout=60)
+        system_prompt = """你是专注于A股交易决策的分析助手。
+你的任务是根据真实市场数据，输出聚焦当前操作的简短分析报告。
+必须包含：结论卡片（操作评级+核心理由）、核心判断与风险机会、操作计划（含具体触发价位）。
+如果数据不足，写”数据缺失，不能下结论”，禁止编造价格、支撑位、订单、客户信息。
+禁止泛泛而谈；每个判断都必须回到当前股票真实数据。"""
 
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        from openai import OpenAI
+        from openai import (
+            APITimeoutError,
+            APIConnectionError,
+            RateLimitError,
+            InternalServerError,
+        )
+
+        # v1.5: 精细超时控制 — read=90s 确保逐 chunk 卡住时快速失败
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=httpx.Timeout(300.0, connect=15.0, read=90.0),
+        )
+
+        # 可重试的网络异常列表
+        _RETRYABLE = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
+
+        def _do_request():
+            """执行一次 LLM 请求（流式或非流式），返回完整文本。"""
             if stream_callback:
                 stream = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role":"user","content":prompt}],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    stream=True
+                    model=model, messages=messages,
+                    max_tokens=max_tokens, temperature=temperature, stream=True,
                 )
                 full = ""
+                deadline = time.monotonic() + 300  # 总超时 5min
                 for chunk in stream:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"AI 流式响应总超时（300s），provider={provider}")
                     delta = chunk.choices[0].delta if chunk.choices else None
-                    if delta and delta.content:
-                        content = delta.content
-                        full += content
-                        stream_callback(content)
+                    if delta:
+                        text = delta.content
+                        if not text:
+                            text = getattr(delta, 'reasoning', None) or getattr(delta, 'reasoning_content', None) or ''
+                        if text:
+                            full += text
+                            stream_callback(text)
+                if not full:
+                    raise RuntimeError(f"[{provider}] empty stream")
                 return full
-            else:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role":"user","content":prompt}],
-                    max_tokens=max_tokens,
-                    temperature=temperature
-                )
-                return resp.choices[0].message.content
-        except Exception as e:
-            err_msg = str(e)
-            logger.error(f"[AI] [{provider}] 调用失败: {err_msg[:100]}")
-            # 认证失败时尝试其他有key的提供商
-            # MiniMax: 旧版端点不支持OpenAI格式，用原生请求
-            if 'minimax' in provider.lower() and ('401' in err_msg or '404' in err_msg):
-                logger.info("[AI] MiniMax OpenAI端点失败，尝试旧版API")
-                try:
-                    import requests as _req
-                    legacy_url = base_url.rstrip('/v1').rstrip('/') + '/v1/text/chatcompletion'
-                    payload = {
-                        "model": model,
-                        "messages": [{"sender_type":"USER","sender_name":"user","text": prompt}],
-                        "tokens_to_generate": max_tokens,
-                        "temperature": temperature,
-                    }
-                    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-                    resp = _req.post(legacy_url, json=payload, headers=headers, timeout=30)
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        reply = result.get('reply', '') or result.get('choices',[{}])[0].get('text','') or result.get('data',{}).get('reply','')
-                        return reply
-                except Exception as mini_err:
-                    logger.error(f"[AI] MiniMax旧版API也失败: {mini_err}")
 
-            # 认证失败时尝试其他有key的提供商
-            if '401' in err_msg or 'Authentication' in err_msg or 'auth' in err_msg.lower():
-                for fallback_provider, key in api_keys.items():
-                    if key and key != api_key and fallback_provider not in ('notes',):
-                        logger.info(f"[AI] [{provider}] 认证失败，切换到 {fallback_provider}")
-                        provider = fallback_provider
-                        api_key = key
-                        model = ai_cfg.get('models', {}).get(provider, 'gpt-4o-mini')
-                        base_url = ai_cfg.get('api_base_urls', {}).get(provider, 'https://api.openai.com/v1')
-                        base_url = base_url.strip().rstrip('/')
-                        if not base_url.startswith('http'):
-                            base_url = 'https://' + base_url
-                        try:
-                            client = OpenAI(api_key=api_key, base_url=base_url, timeout=60)
-                            resp = client.chat.completions.create(
-                                model=model, messages=[{"role":"user","content":prompt}],
-                                max_tokens=max_tokens, temperature=temperature)
-                            return resp.choices[0].message.content
-                        except:
-                            continue
-            return f"(AI分析暂时不可用: {err_msg[:60]})"
+            resp = client.chat.completions.create(
+                model=model, messages=messages,
+                max_tokens=max_tokens, temperature=temperature,
+            )
+            if not (resp.choices and resp.choices[0].message and resp.choices[0].message.content):
+                raise RuntimeError(f"[{provider}] empty response")
+            return resp.choices[0].message.content
+
+        # v1.5: 带 1 次重试的调用
+        for attempt in range(1, 3):
+            try:
+                return _do_request()
+            except _RETRYABLE as e:
+                if attempt == 1:
+                    logger.warning(f"[AI] {provider} 第 1 次失败（{type(e).__name__}），2s 后重试: {e}")
+                    time.sleep(2)
+                    continue
+                raise
+            except Exception:
+                # 非重试异常（如空响应、超时等），直接抛
+                raise
+
+
+# ── 快速 MyTT 指标计算（纯 numpy，不用 pandas/pd.Series.rolling）──
+def _compute_mytt_fast(closes, highs, lows):
+    """纯 numpy 实现 DMI/BIAS/WR/MTM/ROC/PSY，用时 ~2s"""
+    c = np.asarray(closes, dtype=float)
+    h = np.asarray(highs, dtype=float)
+    l = np.asarray(lows, dtype=float)
+    n = len(c)
+
+    # DMI - 纯 numpy 滚动窗口
+    def _sum_over(arr, period):
+        out = np.full_like(arr, np.nan)
+        cum = np.cumsum(arr)
+        out[period-1:] = (cum[period-1:] - np.concatenate([[0], cum[:-period]])) / period * period
+        return out
+
+    # TR
+    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
+    tr_pad = np.zeros(n)
+    tr_pad[1:] = tr
+    tr_sum = _sum_over(tr_pad, 14)
+
+    # HD / LD
+    hd = np.zeros(n); hd[1:] = h[1:] - h[:-1]
+    ld = np.zeros(n); ld[1:] = l[:-1] - l[1:]
+
+    dmp = np.where((hd > 0) & (hd > ld), hd, 0)
+    dmm = np.where((ld > 0) & (ld > hd), ld, 0)
+    dmp_sum = _sum_over(dmp, 14)
+    dmm_sum = _sum_over(dmm, 14)
+
+    pdi_arr = np.where(tr_sum > 0, dmp_sum * 100 / tr_sum, 0)
+    mdi_arr = np.where(tr_sum > 0, dmm_sum * 100 / tr_sum, 0)
+    dx = np.where((pdi_arr + mdi_arr) > 0, np.abs(mdi_arr - pdi_arr) / (pdi_arr + mdi_arr) * 100, 0)
+    adx_arr = _sum_over(dx, 6)
+    # 修正 ADX 滑动平均（MyTT 是 MA 不是 SUM）
+    adx_ma = np.full_like(adx_arr, np.nan)
+    for i in range(len(adx_arr)):
+        if i >= 5: adx_ma[i] = np.mean(adx_arr[i-5:i+1]) if not np.isnan(adx_arr[i-5]) else adx_arr[i]
+    adx_val = float(adx_ma[-1]) if not np.isnan(adx_ma[-1]) else 0
+
+    pdi = float(pdi_arr[-1]) if not np.isnan(pdi_arr[-1]) else 0
+    mdi = float(mdi_arr[-1]) if not np.isnan(mdi_arr[-1]) else 0
+
+    # BIAS(6)
+    ma6 = np.mean(c[-6:]) if n >= 6 else np.mean(c)
+    bias6 = float((c[-1] - ma6) / ma6 * 100) if ma6 > 0 else 0
+
+    # WR(10)
+    if n >= 10:
+        h10 = np.max(h[-10:])
+        l10 = np.min(l[-10:])
+        wr10 = float((h10 - c[-1]) / (h10 - l10) * -100) if (h10 - l10) > 0 else -50
+    else:
+        wr10 = -50
+
+    # MTM(12)
+    mtm = float(c[-1] - c[-13]) if n >= 13 else 0
+
+    # ROC(12)
+    roc = float((c[-1] - c[-13]) / c[-13] * 100) if n >= 13 and c[-13] > 0 else 0
+
+    # PSY(12)
+    if n >= 12:
+        up_days = sum(1 for i in range(-11, 0) if c[i] > c[i-1]) if n >= 13 else 0
+        psy = float(up_days / min(n-1, 12) * 100) if n > 1 else 50
+    else:
+        psy = 50
+
+    return {
+        "pdi": round(pdi, 2), "mdi": round(mdi, 2), "adx": round(adx_val, 2),
+        "bias6": round(bias6, 2), "wr10": round(wr10, 2),
+        "mtm": round(mtm, 2), "roc": round(roc, 2), "psy": round(psy, 2),
+    }
+
 
 __all__ = ['StockAnalyzer']

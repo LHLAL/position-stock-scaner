@@ -1,0 +1,269 @@
+/* ─────────────────────────────────────────────────────────────
+   Design Tokens · Stock Scanner 3.1 Workflow Shell
+   v1.1 · 2026-06-14 · Codex 评审修订
+   ─────────────────────────────────────────────────────────────
+   使用规范：
+   - 所有组件 CSS 通过 var(--token) 引用，不写死
+   - 浅色 / 深色主题：[data-theme="light"] / 默认 dark
+   - 不引入新 token：组件需要新值时先讨论，避免 token 膨胀
+   ───────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── 1. 颜色 · 深色（默认） ─────────────────────────── */
+  /* 层级：bg-0 全局 → bg-1 卡片 → bg-2 悬浮，每层 +6% 亮度 */
+  --color-bg-0:        #0a0e14;   /* 全局底色 */
+  --color-bg-1:        #11161d;   /* 卡片底 */
+  --color-bg-2:        #1a212c;   /* 悬浮 / 选中 */
+  --color-bg-3:        #232b38;   /* 强悬浮（modal/tooltip） */
+
+  /* 描边：靠线条不靠阴影 */
+  --color-border:      #222a36;   /* 默认描边 */
+  --color-border-2:    #2e3744;   /* 强描边（focus） */
+  --color-border-sub:  #1a2028;   /* 表格行内分割 */
+
+  /* 文本：3 级，弱化色 text-3 不用于 body（对比度不足） */
+  --color-text-1:      #e6edf3;   /* 主文 · 对比度 14.5:1 ✓ AAA */
+  --color-text-2:      #b8c1cc;   /* 次文 · 对比度 8.2:1 ✓ AAA（原 #9aa4af 升一档） */
+  --color-text-3:      #7c8693;   /* 弱化 · 对比度 4.6:1 ✓ AA（仅 caption/label） */
+  --color-text-4:      #5b6470;   /* 已废弃 · 不要用 */
+
+  /* Accent：操作 / 数据语义色 */
+  --color-accent-1:    #3b82f6;   /* 主蓝 · 操作/价格正常/选中 */
+  --color-accent-1-h:  #60a5fa;   /* 主蓝 hover */
+  --color-accent-2:    #ef4444;   /* 涨 / 多 / 买入 · 4.6:1 on bg-0 ✓ AA */
+  --color-accent-2-h:  #f87171;
+  --color-accent-3:    #10b981;   /* 跌 / 空 / 卖出 · 4.7:1 ✓ AA */
+  --color-accent-3-h:  #34d399;
+  --color-accent-4:    #f59e0b;   /* 警告 / 持有 · 7.2:1 ✓ AAA */
+  --color-accent-5:    #a78bfa;   /* AI / 流式 · 7.0:1 ✓ AAA */
+  --color-accent-6:    #6b7280;   /* 中性 / 数据源降级 · 4.5:1 ✓ AA */
+
+  /* 状态色 */
+  --color-success:     var(--color-accent-2);
+  --color-warning:     var(--color-accent-4);
+  --color-error:       var(--color-accent-3);
+  --color-info:        var(--color-accent-1);
+  --color-neutral:     var(--color-text-2);
+
+  /* 4 态背景（半透明叠加 bg-1） */
+  --state-loading-bg:  rgba(59, 130, 246, 0.06);
+  --state-empty-bg:    rgba(184, 193, 204, 0.04);
+  --state-error-bg:    rgba(239, 68, 68, 0.08);
+  --state-stale-bg:    rgba(245, 158, 11, 0.06);
+
+  /* 焦点环 · 键盘可达性（WCAG 2.4.7） */
+  --color-focus-ring:  #60a5fa;   /* accent-1-h */
+  --focus-ring-width:  2px;
+  --focus-ring-offset: 2px;
+
+  /* ── 2. 字体 · WCAG AA 升档后 ───────────────────────── */
+  --font-sans: "PingFang SC", "Microsoft YaHei", "Source Han Sans SC",
+               "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas",
+               ui-monospace, monospace;
+
+  /* 字号 · 13px body（升一档，原 12.5） */
+  --fs-display:  20px;   /* 卡片大数字（评分） */
+  --fs-h1:       16px;   /* 卡片标题 */
+  --fs-h2:       14px;   /* 段落标题 */
+  --fs-body:     13px;   /* 正文 */
+  --fs-caption:  11px;   /* 标签 / 时间戳 · 最小可读 */
+  --fs-micro:    10px;   /* 仅 axis label，禁止 body 用 */
+
+  /* 行高 */
+  --lh-tight:    1.3;
+  --lh-normal:   1.5;
+  --lh-loose:    1.7;
+
+  /* 字重 */
+  --fw-regular:  400;
+  --fw-medium:   500;
+  --fw-semibold: 600;
+  --fw-bold:     700;
+
+  /* 数字字宽（防止 5/6 位数视觉跳） */
+  --font-feature-numeric: "tnum" 1, "lnum" 1;
+
+  /* ── 3. 间距 · 4px 基准 ─────────────────────────────── */
+  --space-0:  0;
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* 圆角 · 金融工具保持"硬"（小圆角），不用 iOS 大圆角 */
+  --radius-sm:  2px;
+  --radius-md:  4px;
+  --radius-lg:  6px;
+  --radius-xl:  8px;
+
+  /* 边框宽度 */
+  --border-w-1: 1px;
+  --border-w-2: 2px;   /* 强调条（自选股涨跌幅） */
+
+  /* 阴影 · 不用阴影做层次（v1.1 决定），仅用于浮层 */
+  --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md:  0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg:  0 8px 24px rgba(0, 0, 0, 0.6);
+  --shadow-xl:  0 16px 48px rgba(0, 0, 0, 0.7);
+
+  /* ── 4. 布局尺寸 · 视区分布 ────────────────────────── */
+  --header-h:        56px;
+  --toolbar-h:       44px;
+  --sidebar-w:       280px;
+  --sidebar-w-min:   200px;
+  --sidebar-w-max:   360px;
+  --sidebar-w-icon:  64px;
+  --statusbar-h:     32px;
+  --statusbar-h-max: 50vh;
+
+  /* 网格列宽比例（4:3:3） */
+  --col-chart:       4fr;
+  --col-ai:          3fr;
+  --col-context:     3fr;
+
+  /* ── 5. 断点 · 桌面优先 ───────────────────────────── */
+  --bp-xl:  1440px;   /* 默认三栏 + 侧边栏 */
+  --bp-md:  1280px;   /* 三栏紧凑 */
+  --bp-sm:  1024px;   /* 两栏（合并右侧为抽屉） */
+  --bp-xs:  768px;    /* 单栏 + 底部 Tab（v1.1） */
+
+  /* ── 6. z-index 层 ─────────────────────────────────── */
+  --z-base:    0;
+  --z-elev:    10;    /* 卡片悬浮 */
+  --z-sticky:  100;   /* sticky header / table header */
+  --z-overlay: 500;   /* ⌘K 面板 / dropdown */
+  --z-modal:   1000;  /* modal */
+  --z-toast:   2000;  /* 右上角通知 */
+  --z-tooltip: 3000;
+
+  /* ── 7. 动画 · v1 不加任何主动画（Codex [P1]） ───── */
+  /* 只保留 0.15s 状态过渡（hover/focus），不出现 blinking/pulsing */
+  --duration-fast:   100ms;
+  --duration-normal: 150ms;
+  --ease-out:        cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── 8. 表格 ─────────────────────────────────────── */
+  --table-row-h:     32px;
+  --table-row-h-lg:  40px;
+  --table-zebra:     rgba(255, 255, 255, 0.02);
+
+  /* ── 9. K 线 / 图表 ──────────────────────────────── */
+  --chart-h-kline:        280px;
+  --chart-h-volume:        80px;
+  --chart-h-indicator:    120px;
+  --chart-h-radar:        180px;
+  --chart-h-trend:         80px;
+  --chart-grid-line:      #1a2028;
+  --chart-grid-axis:      #2e3744;
+  --chart-crosshair:      #5b6470;
+}
+
+/* ── 浅色主题 · v1.1 第二批校准 ─────────────────────────
+   策略：
+   - bg/text 镜像深色三层（保持层次感）
+   - accent 2/3（涨/跌）改深，浅底上需 WCAG AA（≥ 4.5:1）
+   - chart-grid 改浅灰，雷达/sparkline 不变（用同一 token）
+   ──────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --color-bg-0:        #fafbfc;
+  --color-bg-1:        #ffffff;
+  --color-bg-2:        #f3f4f6;
+  --color-bg-3:        #e5e7eb;
+  --color-border:      #e5e7eb;
+  --color-border-2:    #d1d5db;
+  --color-border-sub:  #f3f4f6;
+  --color-text-1:      #111827;   /* 16:1 on bg-0 ✓ AAA */
+  --color-text-2:      #374151;   /* 9.4:1 ✓ AAA（升档自原 #4b5563） */
+  --color-text-3:      #4b5563;   /* 6.6:1 ✓ AA（升档自 #6b7280，旧 4.0:1 不够） */
+  --color-text-4:      #9ca3af;   /* 仍废弃 */
+
+  /* 涨/跌色 —— 浅底校准（深色版偏亮，浅底对比度不够） */
+  --color-accent-1:    #2563eb;   /* 主蓝 · 5.0:1 ✓ AA */
+  --color-accent-1-h:  #1d4ed8;
+  --color-accent-2:    #b91c1c;   /* 涨 · 6.4:1 ✓ AA（深色版 #ef4444 浅底只 3.5:1） */
+  --color-accent-2-h:  #dc2626;
+  --color-accent-3:    #047857;   /* 跌 · 5.4:1 ✓ AA（深色版 #10b981 浅底只 2.2:1） */
+  --color-accent-3-h:  #059669;
+  --color-accent-4:    #b45309;   /* 警告 · 5.8:1 ✓ AA */
+  --color-accent-5:    #6d28d9;   /* AI · 6.5:1 ✓ AA */
+  --color-accent-6:    #4b5563;   /* 中性 · 6.6:1 ✓ AA */
+
+  /* 4 态背景（浅色透明度调小，避免发糊） */
+  --state-loading-bg:  rgba(37, 99, 235, 0.05);
+  --state-empty-bg:    rgba(75, 85, 99, 0.04);
+  --state-error-bg:    rgba(185, 28, 28, 0.06);
+  --state-stale-bg:    rgba(180, 83, 9, 0.06);
+
+  --color-focus-ring:  #2563eb;
+
+  /* 阴影 —— 浅底用更浅的黑 */
+  --shadow-sm:  0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md:  0 4px 12px rgba(15, 23, 42, 0.08);
+  --shadow-lg:  0 8px 24px rgba(15, 23, 42, 0.12);
+
+  /* 表格斑马 */
+  --table-zebra: rgba(0, 0, 0, 0.025);
+
+  /* 图表 grid */
+  --chart-grid-line:   #e5e7eb;
+  --chart-grid-axis:   #d1d5db;
+  --chart-crosshair:   #6b7280;
+}
+
+/* ── 减少动画偏好 · 尊重 OS 设置 ────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast:   0ms;
+    --duration-normal: 0ms;
+  }
+}
+
+/* ── 全局基础样式 · 仅 token 引用，不写组件 ─────────── */
+html, body {
+  margin: 0; padding: 0;
+  background: var(--color-bg-0);
+  color: var(--color-text-1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  font-feature-settings: var(--font-feature-numeric);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button { cursor: pointer; }
+
+/* 键盘焦点 · 全局规则（WCAG 2.4.7） */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-sm);
+}
+
+/* 数字默认等宽（防止位数跳） */
+.num, .mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* 文本辅助色类 · 不用时不要滥用 text-3 */
+.t1 { color: var(--color-text-1); }
+.t2 { color: var(--color-text-2); }
+.t3 { color: var(--color-text-3); }
+.up { color: var(--color-accent-2); }
+.down { color: var(--color-accent-3); }
+.warn { color: var(--color-accent-4); }
+.ai { color: var(--color-accent-5); }

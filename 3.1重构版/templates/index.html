@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>Stock Scanner 3.1 v2 · 未选择股票</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!--
+  index-v2.html · Day 2 smoke test
+  - 复用 tokens.css + layout.css + components.css
+  - 不依赖 templates/index.html 的 2638 行 JS
+  - 4 态切换 JS 是 v2 自己的（~50 行），最后一天合并时再考虑共享
+-->
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=20260627-scan">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/layout.css') }}?v=20260627-scan">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/components.css') }}?v=20260628-layout">
+<script>
+  // FOUC 防闪白：主题在样式表加载前应用
+  (function(){
+    try {
+      var t = localStorage.getItem('theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {}
+  })();
+</script>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ── Header ────────────────────────────── -->
+  <header class="header" role="banner">
+    <button class="sidebar-toggle" type="button" aria-label="打开侧边栏" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6 H20 M4 12 H20 M4 18 H20"/></svg>
+    </button>
+    <div class="logo">AI 股票分析系统</div>
+    <div class="search" role="search">
+      <label class="visually-hidden" for="search">搜索股票</label>
+      搜索股票代码 / 名称 / 拼音
+      <span style="flex:1"></span>
+      <kbd>⌘</kbd><kbd>K</kbd>
+    </div>
+    <div class="pill">v3.1 重构版 · v2 smoke</div>
+    <div style="color:var(--color-text-2);font-size:var(--fs-caption);">SSE 实时</div>
+    <button class="icon-btn" id="btn-header-alerts" aria-label="打开事件日志" title="打开事件日志" style="position:relative;">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9 M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      <span class="badge" data-header-event-count aria-hidden="true">0</span>
+    </button>
+    <button class="icon-btn" id="btn-header-settings" aria-label="设置" title="打开设置">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3 M12 19v3 M4.2 4.2l2.1 2.1 M17.7 17.7l2.1 2.1 M2 12h3 M19 12h3 M4.2 19.8l2.1-2.1 M17.7 6.3l2.1-2.1"/></svg>
+    </button>
+  </header>
+
+  <!-- ── Scenario Nav ─────────────────────── -->
+  <nav class="scenario-nav" role="navigation" aria-label="场景切换">
+    <a href="#/v2" data-route="#/v2" class="active">📊 单股深度</a>
+    <a href="#/scan" data-route="#/scan">🔍 扫盘</a>
+    <a href="#/patrol" data-route="#/patrol">💼 持仓</a>
+    <a href="#/signals" data-route="#/signals">📡 市场信号</a>
+    <a href="#/review" data-route="#/review">🧭 复盘</a>
+    <a href="#/bottleneck" data-route="#/bottleneck">🎯 铲子股</a>
+  </nav>
+
+  <div class="sidebar-backdrop" data-sidebar-backdrop hidden></div>
+  <div class="main">
+
+    <!-- ── Sidebar ───────────────────────────── -->
+    <aside class="sidebar" id="sidebar" role="complementary" aria-label="自选股"></aside>
+
+    <!-- ── Workspace ─────────────────────────── -->
+    <section class="workspace" role="main">
+
+      <div class="toolbar">
+        <div>
+          <span class="title">未选择股票</span>
+          <span class="sub">请从左侧持仓/自选中选择股票</span>
+        </div>
+        <div class="seg" role="group" aria-label="K 线周期" id="period-tabs">
+          <button type="button" data-period="1D" aria-pressed="false">1D</button>
+          <button type="button" data-period="5D" aria-pressed="false">5D</button>
+          <button type="button" data-period="1M" class="on" aria-pressed="true">1M</button>
+          <button type="button" data-period="3M" aria-pressed="false">3M</button>
+          <button type="button" data-period="1Y" aria-pressed="false">1Y</button>
+          <button type="button" data-period="ALL" aria-pressed="false">ALL</button>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn-primary" id="btn-analyze">分析</button>
+        <button class="btn-secondary" id="btn-cmdk" title="命令面板 (⌘K)">⌘K</button>
+      </div>
+
+      <div class="stale-bar" id="stale-bar" role="status" aria-live="polite">
+        <span>选择股票后显示数据状态</span>
+        <button class="btn-secondary">立即刷新</button>
+      </div>
+
+      <div id="view-v2" class="view">
+<div class="col" id="col" style="padding: 0;">
+
+        <!-- v1.1 拖拽分割条：左 4 张图表卡 / 右 AI -->
+        <div class="splitter" id="main-split">
+          <div class="pane" data-pane="left">
+
+        <!-- ── Card 1: K线（顶） + 成交量（中） + 技术指标（底）垂直三段 ── -->
+        <div class="card" data-card="kline">
+          <div class="card-h">
+            <span class="title">K线 + 成交量</span>
+            <span class="meta">
+              <span id="chart-meta">选择股票后加载</span>
+              <span class="kv-toggle">
+                <button type="button" class="kv-toggle-btn on" data-kv-view="kline" data-kv-type="kline">K线</button>
+                <button type="button" class="kv-toggle-btn" data-kv-view="volume" data-kv-type="volume">成交量</button>
+              </span>
+            </span>
+          </div>
+          <div class="card-b" data-slot="body" aria-live="polite">
+
+          <div class="kv-stack" data-kv-view="kline">
+              <!-- ① K线主图 -->
+              <div class="kv-kline">
+                <div id="kline-canvas" class="kv-kline-canvas" aria-label="K线图"></div>
+                <!-- K线 加载/空/错/陈旧 四态 -->
+                <div class="kv-kline-states">
+                  <div data-state="loading" hidden aria-busy="true">
+                    <div class="skeleton h40 w90" style="margin-bottom: var(--space-3);"></div>
+                    <div class="skeleton h40 w70"></div>
+                  </div>
+                  <div data-state="empty" hidden>
+                    <div class="empty-block">
+                      <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 36 L8 8 L40 8 M8 24 L24 12 L40 24 M8 36 L40 36"/></svg>
+                      <div class="head">未选择股票</div>
+                      <div class="sub">请从左侧持仓/自选中选择股票</div>
+                    </div>
+                  </div>
+                  <div data-state="error" hidden role="alert">
+                    <div class="error-block">
+                      <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                      <div class="head">无法获取历史数据</div>
+                      <div class="code">E_KLINE_FETCH · 最后成功 14:23:55</div>
+                      <div class="actions">
+                        <button class="btn-danger" data-cta="retry">立即重试</button>
+                        <button class="btn-secondary">查看日志</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div data-state="stale" hidden>
+                    <div class="stale-badge" aria-label="数据陈旧，更新于 14:23">14:23 后无更新</div>
+                    <svg class="kline-svg" viewBox="0 0 800 280" preserveAspectRatio="none" role="img" aria-label="K线图（数据陈旧，更新于 14:23）">
+                      <polyline fill="none" stroke="#60a5fa" stroke-width="1.2" opacity="0.5"
+                        points="20,200 50,196 80,180 110,160 140,170 170,155 200,145 230,150 260,135 290,140 320,120 350,115 380,100 410,105 440,90 470,85 500,75 530,80 560,70 590,68 620,55 650,60 680,50 710,45 740,40 770,38"/>
+                      <g>
+                        <rect x="20" y="180" width="18" height="28" fill="#ef4444" opacity="0.5"/>
+                        <rect x="68" y="152" width="18" height="32" fill="#10b981" opacity="0.5"/>
+                        <rect x="116" y="145" width="18" height="30" fill="#ef4444" opacity="0.5"/>
+                        <rect x="260" y="90" width="18" height="35" fill="#ef4444" opacity="0.5"/>
+                        <rect x="548" y="50" width="18" height="32" fill="#ef4444" opacity="0.5"/>
+                        <rect x="764" y="40" width="18" height="32" fill="#ef4444" opacity="0.5"/>
+                      </g>
+                    </svg>
+                  </div>
+                </div>
+                <!-- K线 降级 SVG -->
+                <div id="kline-fallback" class="kv-kline-fallback" hidden>
+                  <svg class="kline-svg" viewBox="0 0 800 280" preserveAspectRatio="none" role="img" aria-label="K线图（静态占位，后端接口未就绪）">
+                    <g stroke="#1a2028" stroke-width="0.5">
+                      <line x1="0" y1="56" x2="800" y2="56"/>
+                      <line x1="0" y1="112" x2="800" y2="112"/>
+                      <line x1="0" y1="168" x2="800" y2="168"/>
+                      <line x1="0" y1="224" x2="800" y2="224"/>
+                    </g>
+                    <text x="4" y="14" class="kline-axis">1820</text>
+                    <text x="4" y="62" class="kline-axis">1760</text>
+                    <text x="4" y="118" class="kline-axis">1700</text>
+                    <text x="4" y="174" class="kline-axis">1640</text>
+                    <text x="4" y="230" class="kline-axis">1580</text>
+                    <polyline fill="none" stroke="#60a5fa" stroke-width="1.2" opacity="0.7"
+                      points="20,200 50,196 80,180 110,160 140,170 170,155 200,145 230,150 260,135 290,140 320,120 350,115 380,100 410,105 440,90 470,85 500,75 530,80 560,70 590,68 620,55 650,60 680,50 710,45 740,40 770,38"/>
+                    <polyline fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.7"
+                      points="20,220 50,215 80,210 110,200 140,195 170,190 200,180 230,175 260,170 290,165 320,160 350,155 380,150 410,145 440,140 470,135 500,130 530,125 560,120 590,115 620,110 650,105 680,100 710,95 740,92 770,88"/>
+                    <g>
+                      <line x1="29" y1="170" x2="29" y2="215" stroke="#ef4444"/><rect x="20" y="180" width="18" height="28" fill="#ef4444"/>
+                      <line x1="77" y1="145" x2="77" y2="190" stroke="#10b981"/><rect x="68" y="152" width="18" height="32" fill="#10b981"/>
+                      <line x1="125" y1="140" x2="125" y2="180" stroke="#ef4444"/><rect x="116" y="145" width="18" height="30" fill="#ef4444"/>
+                      <line x1="269" y1="85" x2="269" y2="135" stroke="#ef4444"/><rect x="260" y="90" width="18" height="35" fill="#ef4444"/>
+                      <line x1="557" y1="45" x2="557" y2="90" stroke="#ef4444"/><rect x="548" y="50" width="18" height="32" fill="#ef4444"/>
+                      <line x1="773" y1="35" x2="773" y2="80" stroke="#ef4444"/><rect x="764" y="40" width="18" height="32" fill="#ef4444"/>
+                    </g>
+                  </svg>
+                </div>
+              </div>
+
+              <!-- ② 旧成交量副图已合并到 #kline-canvas（tab 切换），删除独立区块 -->
+
+            </div><!-- /kv-stack -->
+
+          </div>
+        </div><!-- /kline card -->
+
+        <!-- ── Card 2: 技术指标 ──────────────────── -->
+        <div class="card" data-card="indicators">
+          <div class="card-h">
+            <span class="title">技术指标</span>
+            <span class="meta" id="indicators-meta">18 项</span>
+          </div>
+          <div class="card-b" data-slot="body" aria-live="polite">
+            <div class="kv-indicator">
+              <div class="subtab" id="indicator-tabs" role="tablist" aria-label="指标分类">
+                <button type="button" class="on" role="tab" data-ind-tab="rsi" aria-selected="true">RSI</button>
+                <button type="button" role="tab" data-ind-tab="macd" aria-selected="false">MACD</button>
+                <button type="button" role="tab" data-ind-tab="kdj" aria-selected="false">KDJ</button>
+                <button type="button" role="tab" data-ind-tab="boll" aria-selected="false">布林</button>
+                <button type="button" role="tab" data-ind-tab="pattern" aria-selected="false">形态</button>
+                <button type="button" role="tab" data-ind-tab="chanlun" aria-selected="false">缠论</button>
+              </div>
+              <div class="ind-grid" id="indicators-grid"></div>
+              <div class="kv-indicator-states">
+                <div data-state="loading" hidden aria-busy="true">
+                  <div class="skeleton w50" style="margin-bottom: var(--space-3);"></div>
+                  <div class="skeleton w90"></div>
+                  <div class="skeleton w70"></div>
+                  <div class="skeleton w90"></div>
+                </div>
+                <div data-state="empty" hidden>
+                  <div class="empty-block">
+                    <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="18"/><path d="M16 24 L22 30 L32 18"/></svg>
+                    <div class="head">未选择股票</div>
+                    <div class="sub">选择股票后加载真实技术指标</div>
+                  </div>
+                </div>
+                <div data-state="error" hidden role="alert">
+                  <div class="error-block">
+                    <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                    <div class="head">技术指标计算失败</div>
+                    <div class="code">E_INDICATOR_CALC</div>
+                    <div class="actions">
+                      <button class="btn-danger" data-cta="retry">立即重试</button>
+                    </div>
+                  </div>
+                </div>
+                <div data-state="stale" hidden>
+                  <div class="stale-badge" aria-label="数据陈旧，更新于 14:23">14:23 后无更新</div>
+                  <div class="ind-grid" aria-label="技术指标（陈旧数据快照）">
+                    <span class="lbl">RSI(14)</span>      <span class="val">65.2</span>
+                    <span class="lbl">MACD DIF</span>     <span class="val pos">+0.12</span>
+                    <span class="lbl">MACD DEA</span>     <span class="val pos">+0.08</span>
+                    <span class="lbl">KDJ K</span>        <span class="val">82.4</span>
+                    <span class="lbl">布林中轨</span>      <span class="val">1720.0</span>
+                    <span class="lbl">形态</span>         <span class="val pos">上升三买</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div><!-- /indicators card -->
+
+          </div><!-- /left pane -->
+
+          <div class="handle" data-handle title="拖动调宽度 · 双击恢复"></div>
+
+          <div class="pane" data-pane="right">
+
+        <!-- ── Card 3: AI 解读（ai-panel.js 渲染）──── -->
+        <div class="card" data-card="ai">
+          <div class="card-h">
+            <span class="title" id="ai-card-title">AI 深度解读</span>
+            <span class="meta">
+              <span class="subtab" id="ai-mode-tabs" role="tablist" style="margin-right: 8px; display: none;">
+                <button type="button" class="on" data-ai-mode="quick" aria-selected="true">快速解读</button>
+                <button type="button" data-ai-mode="deep" aria-selected="false">深度分析</button>
+              </span>
+              <span id="ai-progress-text"></span>
+            </span>
+          </div>
+          <!-- 顶部进度条（流式时显示） -->
+          <div style="position:relative; height: 2px; background: var(--color-bg-2);">
+            <div id="ai-progress" hidden style="position:absolute; top:0; left:0; height:100%; width: 0%; background: var(--color-accent-5); transition: width 200ms ease;"></div>
+          </div>
+          <div class="card-b" data-slot="body" aria-live="polite" style="min-height: 120px;">
+
+            <div data-state="normal">
+              <div id="ai-quick-content" data-ai-panel="quick" style="line-height: var(--lh-loose); font-size: var(--fs-body); color: var(--color-text-1);"></div>
+              <div id="ai-deep-content" data-ai-panel="deep" hidden style="line-height: var(--lh-loose); font-size: var(--fs-body); color: var(--color-text-1);"></div>
+            </div>
+
+            <div data-state="empty" hidden>
+              <div class="empty-block" style="padding: var(--space-4);">
+                <svg viewBox="0 0 48 48" aria-hidden="true" style="width: 36px; height: 36px;">
+                  <path d="M8 8 L40 8 L40 36 L24 36 L18 42 L18 36 L8 36 Z M14 16 L34 16 M14 22 L30 22 M14 28 L26 28"/>
+                </svg>
+                <div class="head" style="font-size: var(--fs-body);">等待首次分析</div>
+                <div class="sub">点击工具栏"分析"按钮启动 AI 解读</div>
+              </div>
+            </div>
+
+            <div data-state="loading" hidden aria-busy="true">
+              <div class="empty-block" style="padding: var(--space-4);">
+                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                  <div style="width: 24px; height: 24px; border: 2px solid var(--color-accent-5); border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                  <div style="text-align: left;">
+                    <div style="font-weight: 500; color: var(--color-text-1);" id="ai-status-title">正在分析...</div>
+                    <div style="font-size: 12px; color: var(--color-text-3);" id="ai-status-detail">获取市场数据中</div>
+                  </div>
+                </div>
+                <div id="ai-quick-content" data-ai-panel="quick" style="line-height: var(--lh-loose); font-size: var(--fs-body); color: var(--color-text-1); text-align: left;"></div>
+                <div id="ai-deep-content" data-ai-panel="deep" hidden style="line-height: var(--lh-loose); font-size: var(--fs-body); color: var(--color-text-1); text-align: left;"></div>
+              </div>
+            </div>
+
+            <div data-state="error" hidden role="alert">
+              <div class="error-block">
+                <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                <div class="head">AI 分析失败</div>
+                <div class="code">E_AI_UNKNOWN</div>
+                <div class="actions">
+                  <button class="btn-danger" data-cta="retry">立即重试</button>
+                </div>
+              </div>
+            </div>
+
+            <div data-state="stale" hidden>
+              <div class="stale-badge" aria-label="流式中断超过 5 分钟">流式已暂停</div>
+              <div class="empty-block" style="padding: var(--space-4);">
+                <div class="head" style="font-size: var(--fs-body);">流式响应超时</div>
+                <div class="sub">超过 5 分钟无新内容，请重试</div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+          </div><!-- /right pane (AI) -->
+        </div><!-- /splitter -->
+
+        <!-- ── Card 4: 4 维评分 + L0-L3 信号（signals.js） ── -->
+        <div class="card" data-card="signals">
+          <div class="card-h">
+            <span class="title">四层量化信号</span>
+            <span class="meta" id="signals-meta">— —</span>
+          </div>
+          <div class="card-b" data-slot="body" aria-live="polite">
+
+            <div data-state="normal">
+              <div class="score-card-row">
+                <div id="score-radar" class="score-radar" aria-label="4 维评分雷达"></div>
+                <div id="score-card-grid" class="score-grid"></div>
+              </div>
+              <div id="signals-list"></div>
+            </div>
+
+            <div data-state="loading" hidden aria-busy="true">
+              <div class="skeleton h24 w70" style="margin-bottom: var(--space-2);"></div>
+              <div class="skeleton w90"></div>
+              <div class="skeleton w70"></div>
+              <div class="skeleton w90"></div>
+            </div>
+
+            <div data-state="empty" hidden>
+              <div class="empty-block" style="padding: var(--space-3);">
+                <div class="sub" style="color: var(--color-text-3);">选择股票后加载量化信号</div>
+              </div>
+            </div>
+
+            <div data-state="error" hidden role="alert">
+              <div class="error-block">
+                <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                <div class="head">信号计算失败</div>
+                <div class="code">E_SIGNAL_CALC</div>
+                <div class="actions">
+                  <button class="btn-danger" data-cta="retry">立即重试</button>
+                </div>
+              </div>
+            </div>
+
+            <div data-state="stale" hidden>
+              <div class="stale-badge">信号可能过期</div>
+              <div class="sub" style="padding: var(--space-3); color: var(--color-text-3);">显示最近一次成功计算的信号</div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ── Card 5: 市场情绪（market.js） ─────────── -->
+        <div class="card" data-card="market-sentiment">
+          <div class="card-h">
+            <span class="title">市场情绪分析</span>
+            <span class="meta" id="market-sentiment-meta">真实数据源</span>
+          </div>
+          <div class="card-b" aria-live="polite">
+            <div id="market-sentiment-box">
+              <div class="empty-block" style="padding: var(--space-3);"><div class="sub">加载市场情绪…</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Card 6: 个股新闻/政策（market.js） ─────── -->
+        <div class="card" data-card="stock-news">
+          <div class="card-h">
+            <span class="title">个股新闻 / 板块政策</span>
+            <span class="meta" id="stock-news-meta">东财新闻 / 7×24 快讯</span>
+          </div>
+          <div class="card-b" aria-live="polite">
+            <div id="stock-news-box">
+              <div class="empty-block" style="padding: var(--space-3);"><div class="sub">选择股票后加载新闻</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Card 7: 财务表（table.js） ────────────── -->
+        <div class="card" data-card="financials">
+          <div class="card-h">
+            <span class="title">财务/估值指标</span>
+            <span class="meta" id="financials-meta">真实数据源</span>
+          </div>
+          <div class="subtab" id="financial-tabs" style="margin:0;border-bottom:var(--border-w-1) solid var(--color-border);padding:0 var(--space-3);" role="tablist" aria-label="财务分类">
+            <button type="button" class="on" role="tab" data-fin-tab="finance" aria-selected="true">财务</button>
+            <button type="button" role="tab" data-fin-tab="dragon" aria-selected="false">龙虎榜</button>
+            <button type="button" role="tab" data-fin-tab="fund" aria-selected="false">资金</button>
+            <button type="button" role="tab" data-fin-tab="block" aria-selected="false">大宗</button>
+          </div>
+          <div class="card-b flush" data-slot="body" aria-live="polite">
+
+            <div data-state="normal">
+              <div style="max-height: 400px; overflow-y: auto;">
+                <table class="fin" aria-label="财务指标（25 项）">
+                  <thead id="financials-thead">
+                    <tr>
+                      <th data-sort="label" style="cursor: pointer;">指标</th>
+                      <th data-sort="current" style="cursor: pointer;">本期</th>
+                      <th data-sort="previous" style="cursor: pointer;">上期</th>
+                      <th data-sort="change" style="cursor: pointer;">同比</th>
+                      <th data-sort="peer" style="cursor: pointer;">行业中位</th>
+                    </tr>
+                  </thead>
+                  <tbody id="financials-tbody">
+                    <tr><td colspan="5" style="text-align: center; color: var(--color-text-3); padding: var(--space-4);">选择股票后加载</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div data-state="loading" hidden aria-busy="true" style="padding: var(--space-3);">
+              <div class="skeleton w50" style="margin-bottom: var(--space-2);"></div>
+              <div class="skeleton w90"></div>
+              <div class="skeleton w70"></div>
+              <div class="skeleton w90"></div>
+              <div class="skeleton w50"></div>
+            </div>
+
+            <div data-state="empty" hidden style="padding: var(--space-3);">
+              <div class="empty-block">
+                <svg viewBox="0 0 48 48" aria-hidden="true" style="width: 32px; height: 32px;">
+                  <rect x="8" y="8" width="32" height="32" rx="2"/>
+                  <path d="M14 16 L34 16 M14 22 L34 22 M14 28 L26 28"/>
+                </svg>
+                <div class="head" style="font-size: var(--fs-body);">财报尚未披露</div>
+                <div class="sub">通常 4 月底 / 8 月底 / 10 月底披露</div>
+              </div>
+            </div>
+
+            <div data-state="error" hidden role="alert" style="padding: var(--space-3);">
+              <div class="error-block">
+                <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+                <div class="head">财务数据获取失败</div>
+                <div class="code">E_FUNDAMENTAL_FETCH</div>
+                <div class="actions">
+                  <button class="btn-danger" data-cta="retry">立即重试</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    
+</div><!-- /view-v2 -->
+<!-- ── View: Scan ─────────────────────────── -->
+<div id="view-scan" class="view view-hidden">
+  <div class="filter-bar" id="scan-filters" role="tablist" aria-label="筛选策略"></div>
+  <div class="col" id="col-scan">
+    <div class="card" data-card="scan-table">
+      <div class="card-h">
+        <span class="title">📊 扫盘结果</span>
+        <span class="meta" id="scan-table-meta">点行跳深度分析</span>
+        <button class="btn-secondary" type="button" data-action="export-csv" title="导出当前扫盘结果为 CSV">导出 CSV</button>
+      </div>
+      <div class="card-b flush" data-slot="body" aria-live="polite">
+        <div data-state="normal">
+          <div class="table-wrap">
+            <table class="scan" aria-label="扫盘结果">
+              <thead>
+                <tr>
+                  <th>#</th><th>代码</th><th>名称</th><th>涨幅</th><th>现价</th><th>量比</th><th>换手</th><th>PE</th><th>持仓盈亏</th><th>综合分</th><th>题材</th>
+                </tr>
+              </thead>
+              <tbody id="scan-tbody">
+                <tr><td colspan="11" style="text-align: center; color: var(--color-text-3); padding: var(--space-4);">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div data-state="loading" hidden aria-busy="true" style="padding: var(--space-4);">
+          <div class="skeleton w50" style="margin-bottom: var(--space-2);"></div>
+          <div class="skeleton w90"></div>
+          <div class="skeleton w70"></div>
+          <div class="skeleton w90"></div>
+        </div>
+        <div data-state="empty" hidden></div>
+        <div data-state="error" hidden role="alert" style="padding: var(--space-4);">
+          <div class="error-block">
+            <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+            <div class="head">扫盘失败</div>
+            <div class="code">E_SCREENER_FAIL</div>
+            <div class="actions">
+              <button class="btn-danger" data-cta="retry">立即重试</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div><!-- /view-scan -->
+<!-- ── View: Patrol ──────────────────────── -->
+<div id="view-patrol" class="view view-hidden">
+  <div class="col" id="col-patrol">
+    <div class="kpi-bar" id="patrol-stats"></div>
+    <div class="card" data-card="patrol-table">
+      <div class="card-h">
+        <span class="title">💼 持仓明细</span>
+        <span class="meta">点行进入深度分析</span>
+        <button class="btn-secondary" type="button" data-action="export-csv" title="导出当前持仓为 CSV">导出 CSV</button>
+      </div>
+      <div class="card-b flush" data-slot="body" aria-live="polite">
+        <div data-state="normal">
+          <table class="patrol" aria-label="持仓明细">
+            <thead>
+              <tr>
+                <th class="col-drag"></th>
+                <th>代码</th><th>名称</th>
+                <th>成本</th><th>现价</th>
+                <th>市值</th><th>盈亏</th>
+                <th>今日</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="patrol-tbody">
+              <tr><td colspan="9" style="text-align:center; color: var(--color-text-3); padding: var(--space-4);">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div data-state="loading" hidden aria-busy="true" style="padding: var(--space-4);">
+          <div class="skeleton w50" style="margin-bottom: var(--space-2);"></div>
+          <div class="skeleton w90"></div>
+          <div class="skeleton w70"></div>
+          <div class="skeleton w90"></div>
+        </div>
+        <div data-state="empty" hidden></div>
+        <div data-state="error" hidden role="alert" style="padding: var(--space-4);">
+          <div class="error-block">
+            <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L44 40 L4 40 Z M24 18 L24 30 M24 34 L24 36"/></svg>
+            <div class="head">加载失败</div>
+            <div class="code">E_PATROL_FAIL</div>
+            <div class="actions">
+              <button class="btn-danger" data-cta="retry">立即重试</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div><!-- /view-patrol -->
+<!-- ── View: Signals ─────────────────────── -->
+<div id="view-signals" class="view view-hidden">
+  <div class="col" id="col-signals">
+    <div class="signals-grid" id="signals-grid">
+      <div style="grid-column: 1 / -1; text-align: center; color: var(--color-text-3); padding: var(--space-6);">
+        加载中…
+      </div>
+    </div>
+  </div>
+</div><!-- /view-signals -->
+<!-- ── View: Review ──────────────────────── -->
+<div id="view-review" class="view view-hidden">
+  <div class="col" id="col-review">
+    <div class="card" data-card="review-shell">
+      <div class="card-h">
+        <span class="title">🧭 盘前 / 盘后复盘</span>
+        <span class="meta" id="review-meta">复用现有数据</span>
+        <button class="btn-secondary" type="button" id="btn-review-refresh">重新生成</button>
+      </div>
+      <div class="subtab" id="review-tabs" role="tablist" aria-label="复盘类型" style="margin:0;border-bottom:var(--border-w-1) solid var(--color-border);padding:0 var(--space-3);">
+        <button type="button" class="on" role="tab" data-review-mode="premarket" aria-selected="true">🌅 盘前</button>
+        <button type="button" role="tab" data-review-mode="postmarket" aria-selected="false">📰 盘后</button>
+      </div>
+      <div class="review-pipeline" aria-label="今日管线">
+        <span>⏱ 今日管线</span>
+        <b>07:30 盘前分析</b>
+        <b>09:35 开盘调仓</b>
+        <b>15:05 收盘校正</b>
+        <b>16:35 收盘复盘</b>
+        <b>17:30 明日预选</b>
+      </div>
+    </div>
+    <div class="review-grid" id="review-body">
+      <div style="grid-column:1/-1;text-align:center;color:var(--color-text-3);padding:var(--space-6);">加载中…</div>
+    </div>
+  </div>
+</div><!-- /view-review -->
+
+<!-- ── View: Bottleneck ────────────────────── -->
+<div id="view-bottleneck" class="view view-hidden">
+  <div class="col" id="col-bottleneck">
+    <div class="card" data-card="bottleneck-shell">
+      <div class="card-h">
+        <span class="title">🎯 铲子股卡位</span>
+        <span class="meta" id="bottleneck-meta">热门板块 + 卡脖子环节 + 小市值低估值</span>
+        <button class="btn-secondary" type="button" id="btn-bottleneck-refresh">重新生成</button>
+      </div>
+      <div class="subtab" id="bottleneck-sectors" role="tablist" aria-label="板块筛选" style="margin:0;border-bottom:var(--border-w-1) solid var(--color-border);padding:0 var(--space-3);display:flex;flex-wrap:wrap;gap:6px;">
+        <div style="padding:var(--space-2) 0;color:var(--color-text-3);font-size:var(--fs-caption);">加载中…</div>
+      </div>
+      <div id="bottleneck-summary" style="padding:var(--space-2) var(--space-3);background:var(--color-bg-1);border-bottom:var(--border-w-1) solid var(--color-border);"></div>
+      <div id="bottleneck-cache-panel" style="border-bottom:var(--border-w-1) solid var(--color-border);"></div>
+    </div>
+    <div class="bottleneck-grid" id="bottleneck-body" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--space-3);">
+      <div style="grid-column:1/-1;text-align:center;padding:var(--space-6);color:var(--color-text-3);">加载中…</div>
+    </div>
+  </div>
+</div><!-- /view-bottleneck -->
+
+</section>
+  </div>
+
+  <!-- ── Status bar ────────────────────────────── -->
+  <div class="statusbar" role="status" aria-live="polite">
+    <div style="display:flex;align-items:center;gap:6px;"><span class="dot" aria-hidden="true"></span><span data-sse-label>SSE 未连接</span></div>
+    <div data-status-time>--:--:--</div>
+    <div data-model-label>模型加载中…</div>
+    <button type="button" class="btn-plain status-btn" id="btn-events" title="查看事件日志">
+      <span aria-hidden="true">🔔</span>
+      <span data-event-count>0</span>
+      <span class="sr-only">事件</span>
+    </button>
+    <button type="button" class="btn-plain status-btn theme-toggle" aria-label="切换浅色 / 深色主题" title="切换主题（浅 / 深）">
+      <span data-theme-icon-dark aria-hidden="true">🌙</span>
+      <span data-theme-icon-light aria-hidden="true" hidden>☀️</span>
+      <span class="sr-only">切换主题</span>
+    </button>
+    <div><kbd>⌘K</kbd> 命令</div>
+    <div class="spacer"></div>
+    <div style="color:var(--color-accent-2)" data-status-ready>就绪</div>
+  </div>
+
+  <!-- 事件日志面板 -->
+  <div id="events-panel" class="events-panel" hidden>
+    <div class="events-header">
+      <span>事件日志 / 警报</span>
+      <button type="button" class="btn-plain" id="btn-close-events" title="收起事件日志">收起</button>
+    </div>
+    <div class="events-body" id="events-body">
+      <div style="padding: 16px; color: var(--color-text-3); text-align: center;">暂无事件</div>
+    </div>
+  </div>
+
+  <!-- 设置面板 -->
+  <div id="settings-panel" class="events-panel settings-panel" hidden>
+    <div class="events-header">
+      <span>设置</span>
+      <button type="button" class="btn-plain" id="btn-close-settings" title="收起设置">收起</button>
+    </div>
+    <div class="events-body">
+      <div class="settings-row">
+        <div>
+          <div class="settings-title">主题</div>
+          <div class="settings-sub">切换浅色 / 深色界面</div>
+        </div>
+        <button type="button" class="btn-secondary theme-toggle">切换主题</button>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-title">事件日志</div>
+          <div class="settings-sub">清空当前浏览器内的事件 / 警报记录</div>
+        </div>
+        <button type="button" class="btn-secondary" id="btn-clear-events">清空</button>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-title">新闻监控</div>
+          <div class="settings-sub" id="settings-news-status">状态读取中…</div>
+        </div>
+        <button type="button" class="btn-secondary" id="btn-refresh-news-status">刷新</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── 4 态切换 JS（已迁到 app.js） ──── -->
+<script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260628-sentiment"></script>
+
+</body>
+</html>

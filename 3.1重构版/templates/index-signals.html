@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>市场信号 · Stock Scanner 3.1 v1.1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v=20260625-review-real">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/layout.css') }}?v=20260625-review-real">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/components.css') }}?v=20260625-review-real">
+<style>
+  /* 信号卡片墙：2 列 grid */
+  .signals-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+  }
+  @media (max-width: 1280px) {
+    .signals-grid { grid-template-columns: 1fr; }
+  }
+</style>
+<script>
+  // FOUC 防闪白：主题在样式表加载前应用
+  (function(){
+    try {
+      var t = localStorage.getItem('theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {}
+  })();
+</script>
+</head>
+<body data-page="signals">
+
+<div class="app">
+
+  <header class="header" role="banner">
+    <button class="sidebar-toggle" type="button" aria-label="打开侧边栏" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6 H20 M4 12 H20 M4 18 H20"/></svg>
+    </button>
+    <div class="logo">AI 股票分析系统</div>
+    <div class="search" role="search"><span style="flex:1"></span><kbd>⌘</kbd><kbd>K</kbd></div>
+    <div class="pill">v3.1 重构版 · v1.1</div>
+    <div style="color:var(--color-text-2);font-size:var(--fs-caption);">SSE 实时</div>
+    <button class="icon-btn" aria-label="警报"><svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/></svg></button>
+    <button class="icon-btn" aria-label="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/></svg></button>
+  </header>
+
+  <nav class="scenario-nav" role="navigation" aria-label="场景切换">
+    <a href="/v2">📊 单股深度</a>
+    <a href="/scan">🔍 扫盘</a>
+    <a href="/patrol">💼 持仓</a>
+    <a href="/signals" class="active">📡 市场信号</a>
+    <span class="nav-spacer"></span>
+    <span class="nav-meta" id="signals-meta">加载中…</span>
+  </nav>
+
+  <div class="sidebar-backdrop" data-sidebar-backdrop hidden></div>
+  <div class="main">
+
+    <aside class="sidebar" id="sidebar" role="complementary" aria-label="自选股">
+      <div class="group">
+        <div class="group-title"><span>持仓 (3)</span><span>+ 加</span></div>
+        <div class="row up active"><span class="bar"></span><span class="code">600519</span><span class="name">贵州茅台</span><span class="pct">+2.3%</span></div>
+        <div class="row down"><span class="bar"></span><span class="code">603000</span><span class="name">人民网</span><span class="pct">-1.2%</span></div>
+        <div class="row up"><span class="bar"></span><span class="code">000001</span><span class="name">平安银行</span><span class="pct">+0.5%</span></div>
+      </div>
+    </aside>
+
+    <section class="workspace" role="main">
+      <div class="col" id="col">
+        <div class="signals-grid" id="signals-grid">
+          <!-- 由 signals-page.js 渲染 -->
+          <div style="grid-column: 1 / -1; text-align: center; color: var(--color-text-3); padding: var(--space-6);">
+            加载中…
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="statusbar" role="status" aria-live="polite">
+    <div style="display:flex;align-items:center;gap:6px;"><span class="dot" aria-hidden="true"></span><span data-sse-label>SSE 未连接</span></div>
+    <div data-status-time>--:--:--</div>
+    <div>模型 gpt-4o</div>
+    <div data-event-count>0 事件</div>
+    <div><kbd>⌘K</kbd> 命令</div>
+    <div class="spacer"></div>
+    <button class="theme-toggle" type="button" aria-label="切换浅色 / 深色主题" title="切换主题（浅 / 深）">
+      <span data-theme-icon-dark aria-hidden="true">🌙</span>
+      <span data-theme-icon-light aria-hidden="true" hidden>☀️</span>
+    </button>
+    <div style="color:var(--color-accent-2)" data-status-ready>就绪</div>
+  </div>
+</div>
+
+<script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260625-review-real"></script>
+<script type="module" src="{{ url_for('static', filename='js/signals-page.js') }}?v=20260625-review-real"></script>
+</body>
+</html>
