@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Config with secrets
+config.json
+config - *.json
+
+# Database files
+*.db
+*.db.bak.*
+
+# Logs
+*.log
+*.log.*
+
+# PID files
+*.pid
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated / debug images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Node
+node_modules/
+package-lock.json
+
+# Docker
+.docker/
+
+# OpenCode
+.omo/
+.playwright-mcp/
+
+# Server runtime
+server.log
+sse_output.log
+
+# Reference repos (embedded git repos)
+cankao/
