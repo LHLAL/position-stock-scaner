@@ -1628,18 +1628,21 @@ class StockAnalyzer:
         base_url = ai_cfg.get('api_base_urls', {}).get(provider, 'https://api.openai.com/v1')
 
         if not api_key:
-            logger.warning(f"[AI] 提供商 [{provider}] 未配置API密钥")
-            # 遍历所有有API key的提供商作为备用（支持任意提供商名称）
-            for fallback_provider, key in api_keys.items():
-                if key and fallback_provider not in ('notes',):
-                    provider = fallback_provider
-                    api_key = key
-                    model = ai_cfg.get('models', {}).get(provider, 'gpt-4o-mini')
-                    base_url = ai_cfg.get('api_base_urls', {}).get(provider, 'https://api.openai.com/v1')
-                    logger.info(f"[AI] 切换到备用提供商: {provider}")
-                    break
+            if base_url and ('localhost' in base_url or '127.0.0.1' in base_url):
+                api_key = 'ollama'
+                logger.info(f"[AI] 本地提供商 [{provider}] 无需 API key，使用占位值")
             else:
-                return "(未配置API密钥)"
+                logger.warning(f"[AI] 提供商 [{provider}] 未配置API密钥")
+                for fallback_provider, key in api_keys.items():
+                    if key and fallback_provider not in ('notes',):
+                        provider = fallback_provider
+                        api_key = key
+                        model = ai_cfg.get('models', {}).get(provider, 'gpt-4o-mini')
+                        base_url = ai_cfg.get('api_base_urls', {}).get(provider, 'https://api.openai.com/v1')
+                        logger.info(f"[AI] 切换到备用提供商: {provider}")
+                        break
+                else:
+                    return "(未配置API密钥)"
 
         # 清理 base_url（去掉尾部空格/斜线）
         base_url = base_url.strip().rstrip('/')
