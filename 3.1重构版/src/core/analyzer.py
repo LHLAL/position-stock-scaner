@@ -1225,13 +1225,18 @@ class StockAnalyzer:
             if stream_callback:
                 stream_callback("📡 正在获取板块、资金流、新闻等辅助数据...\n\n")
 
-            with ThreadPoolExecutor(max_workers=1) as _prompt_pool:
+            _prompt_pool = ThreadPoolExecutor(max_workers=1)
+            try:
                 _fut = _prompt_pool.submit(self._build_ai_prompt, report, position_data)
                 try:
                     text = _fut.result(timeout=45)
                 except FutureTimeoutError:
                     _fut.cancel()
                     raise TimeoutError("获取辅助数据超时（45s），请检查网络或数据源（东方财富/腾讯/新浪）状态")
+            finally:
+                # ⚠️ 不能用 `with ThreadPoolExecutor` — 超时后 shutdown(wait=True) 会
+                # 等待挂起的线程完成，导致永远阻塞，异常无法传播到外层。
+                _prompt_pool.shutdown(wait=False)
 
             logger.info(f"[AI] 提示词构建完成，长度: {len(text)} 字符")
 
