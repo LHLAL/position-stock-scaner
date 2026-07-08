@@ -1341,14 +1341,21 @@ class StockAnalyzer:
             buy_pts = bs.get('buy_points', [])
             sell_pts = bs.get('sell_points', [])
 
+            def _fmt_pt(p):
+                if isinstance(p, dict):
+                    t = p.get('type', '') or '信号'
+                    cond = p.get('condition', '')
+                    return f"{t}（{cond}）" if cond else t
+                return str(p)
+
             lines = [
                 f"- 综合评分：{score:+.2f}（{trend}{' ' + strength if strength else ''}）",
                 f"- 均线排列：{ma_arr}" if ma_arr else None,
                 f"- 当前分型：{fenxing}" if fenxing else None,
                 f"- 背驰次数：{len(beichi)}" if beichi else None,
                 f"- 重要支撑：MA5={sr.get('ma5','—')} / MA10={sr.get('ma10','—')} / MA20={sr.get('ma20','—')} / 近低={sr.get('recent_low','—')} / 近高={sr.get('recent_high','—')}" if sr else None,
-                f"- 买入信号：{', '.join(buy_pts[:3]) if buy_pts else '暂无'}",
-                f"- 卖出信号：{', '.join(sell_pts[:3]) if sell_pts else '暂无'}",
+                f"- 买入信号：{'; '.join(_fmt_pt(p) for p in buy_pts[:3]) if buy_pts else '暂无'}",
+                f"- 卖出信号：{'; '.join(_fmt_pt(p) for p in sell_pts[:3]) if sell_pts else '暂无'}",
                 f"- 操作建议：{op_advice}" if op_advice else None,
             ]
             chanlun_text = '\n'.join(filter(None, lines))
